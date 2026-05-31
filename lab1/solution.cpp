@@ -42,8 +42,8 @@ constexpr int kInitModeCount = 3;
 
 struct Hypergraph {
     int n = 0;
-    vector<vector<int>> nets;
-    vector<vector<int>> node_nets;
+    vector<vector<int>> nets; // 连接 i 线网上的所有节点的内部索引
+    vector<vector<int>> node_nets; // i 节点所连接的所有线网的索引
     vector<int> node_weight;
 };
 
@@ -71,7 +71,7 @@ struct GainEntryCmp {
 };
 
 void compute_balance_bounds(int total_weight, int &min_x, int &max_x) {
-    int min_val = static_cast<int>(ceil((0.5 - kBalanceRatio) * total_weight));
+    int min_val = static_cast<int>(ceil((0.5 - kBalanceRatio) * total_weight)); // Leslie：乘以权重是因为一开始原始图设定每一个节点的权重为 1， total_weight 为节点数量而粗化图的时候也是相加，所以还是相等的
     int max_val = static_cast<int>(floor((0.5 + kBalanceRatio) * total_weight));
     if (min_val < 0) {
         min_val = 0;
@@ -95,6 +95,7 @@ void rebuild_node_nets(Hypergraph &hg) {
 Hypergraph build_fine_hypergraph(Graph &graph, vector<int> &idx_to_id) {
     Hypergraph hg;
 
+    // 重新建立索引，编号为 0,1,2
     vector<int> ids;
     ids.reserve(graph.get_node_num());
     for (const auto node : graph.get_nodes()) {
@@ -103,15 +104,16 @@ Hypergraph build_fine_hypergraph(Graph &graph, vector<int> &idx_to_id) {
     sort(ids.begin(), ids.end());
     idx_to_id = ids;
 
-    unordered_map<int, int> id_to_idx;
+    unordered_map<int, int> id_to_idx; // 建立 "原始ID -> 内部索引" 的哈希表
     id_to_idx.reserve(ids.size() * 2 + 1);
     for (int i = 0; i < static_cast<int>(ids.size()); ++i) {
         id_to_idx[ids[i]] = i;
     }
 
-    hg.n = static_cast<int>(ids.size());
-    hg.node_weight.assign(hg.n, 1);
+    hg.n = static_cast<int>(ids.size()); // 节点数量
+    hg.node_weight.assign(hg.n, 1); // 基础状态下每个节点的权重都是 1
 
+    // 建立 线 - 点 网
     hg.nets.reserve(graph.get_net_num());
     for (const auto net : graph.get_nets()) {
         vector<int> nodes;
@@ -123,16 +125,20 @@ Hypergraph build_fine_hypergraph(Graph &graph, vector<int> &idx_to_id) {
             }
         }
         sort(nodes.begin(), nodes.end());
-        nodes.erase(unique(nodes.begin(), nodes.end()), nodes.end());
+        nodes.erase(unique(nodes.begin(), nodes.end()), nodes.end()); // 防止脏数据有重复
+
+        // 过滤只有一个节点的无用线网
         if (nodes.size() >= 2) {
             hg.nets.push_back(std::move(nodes));
         }
     }
 
+    // 构造 点 - 线 网
     rebuild_node_nets(hg);
     return hg;
 }
 
+// 粗化，V 的左边
 CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
     CoarsenResult result;
     int n = fine.n;
@@ -141,7 +147,9 @@ CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
     vector<char> unmatched(n, 1);
     vector<int> order(n);
     iota(order.begin(), order.end(), 0);
+    // 随机种子打乱节点顺序
     shuffle(order.begin(), order.end(), rng);
+    // 稳定排序，节点连接的线网多的排前面（度数高的对结果的影响更大）
     stable_sort(order.begin(), order.end(), [&fine](int a, int b) {
         return fine.node_nets[a].size() > fine.node_nets[b].size();
     });
@@ -163,10 +171,13 @@ CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
         for (int net_idx : fine.node_nets[u]) {
             const auto &nodes = fine.nets[net_idx];
             int net_size = static_cast<int>(nodes.size());
+            // 过滤掉连接了太多节点的线网
             if (net_size > kHeavyNetLimit || net_size <= 1) {
                 continue;
             }
+            // 线网越小，权重越高
             double net_weight = 1.0 / static_cast<double>(net_size - 1);
+            // 奖励
             if (net_size <= 4) {
                 net_weight *= kSmallNetBoost;
             }
@@ -174,13 +185,16 @@ CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
                 if (v == u || !unmatched[v]) {
                     continue;
                 }
+                // 为了防止“超级枢纽“ 的出现，这里设置惩罚机制
                 double deg_pen = 1.0 + kMatchDegreePenalty * static_cast<double>(fine.node_nets[v].size());
+                // 得分：线网权重 / 惩罚系数
                 double s = (score[v] += (net_weight / deg_pen));
                 if (s > best_score) {
                     best_score = s;
                     best_v = v;
                 } else if (best_v != -1 && fabs(s - best_score) < 1e-12) {
                     if (fine.node_nets[v].size() < fine.node_nets[best_v].size()) {
+                        // 分数相同的，优先选择度数小的
                         best_v = v;
                     }
                 }
@@ -189,6 +203,7 @@ CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
 
         if (best_v != -1) {
             unmatched[best_v] = 0;
+            // 好朋友组队
             groups.push_back({u, best_v});
         } else {
             groups.push_back({u});
@@ -201,8 +216,8 @@ CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
 
     for (int cid = 0; cid < coarse.n; ++cid) {
         for (int u : groups[cid]) {
-            result.fine_to_coarse[u] = cid;
-            coarse.node_weight[cid] += fine.node_weight[u];
+            result.fine_to_coarse[u] = cid; // 记录映射关系
+            coarse.node_weight[cid] += fine.node_weight[u]; // 权重加和
         }
     }
 
@@ -214,17 +229,21 @@ CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
             coarse_nodes.push_back(result.fine_to_coarse[u]);
         }
         sort(coarse_nodes.begin(), coarse_nodes.end());
+        // 合并后可能会有重复，都合并到同个 cid ，所以去重
         coarse_nodes.erase(unique(coarse_nodes.begin(), coarse_nodes.end()), coarse_nodes.end());
+        // 如果一条线网的 size 变成了 1，说明只有一个节点了，就不进去作为网了
         if (coarse_nodes.size() >= 2) {
             coarse.nets.push_back(std::move(coarse_nodes));
         }
     }
 
+    // 构造 点 - 线 网
     rebuild_node_nets(coarse);
     result.coarse = std::move(coarse);
     return result;
 }
 
+// 节点度排序后划分
 vector<char> init_degree_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     vector<char> part(hg.n, 1);
     vector<int> order(hg.n);
@@ -270,6 +289,7 @@ vector<char> init_degree_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     return part;
 }
 
+// 随机划分
 vector<char> init_random_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     vector<char> part(hg.n, 1);
     vector<int> order(hg.n);
@@ -318,6 +338,7 @@ vector<char> init_random_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     return part;
 }
 
+// 小线网保护的平衡划分
 vector<char> init_smallnet_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     vector<char> part(hg.n, 1);
     vector<double> score(hg.n, 0.0);
@@ -515,8 +536,9 @@ void fm_refine_sampled(const Hypergraph &hg,
 
         vector<int> count_x;
         vector<int> count_y;
-        build_net_side_counts(hg, part, count_x, count_y);
+        build_net_side_counts(hg, part, count_x, count_y); // 计算出每个线网在左边和右边分别有多少节点
 
+        // 计算出总权重 wx 和 wy
         int wx = 0;
         for (int u = 0; u < hg.n; ++u) {
             if (part[u] == 0) {
@@ -534,7 +556,7 @@ void fm_refine_sampled(const Hypergraph &hg,
         priority_queue<GainEntry, vector<GainEntry>, GainEntryCmp> max_heap;
 
         for (int u = 0; u < hg.n; ++u) {
-            gain[u] = -delta_cut_for_move(hg, u, part, count_x, count_y);
+            gain[u] = -delta_cut_for_move(hg, u, part, count_x, count_y); // 如果移动到对面，能减少多少割线
             max_heap.push({gain[u], u, gain_version[u]});
         }
 
@@ -542,6 +564,7 @@ void fm_refine_sampled(const Hypergraph &hg,
         int best_prefix_gain = 0;
         int best_prefix_len = 0;
 
+        // 进行 steps 次节点移动
         for (int step = 0; step < steps; ++step) {
             if (chrono::steady_clock::now() >= deadline) {
                 return;
@@ -554,24 +577,25 @@ void fm_refine_sampled(const Hypergraph &hg,
             vector<GainEntry> deferred;
             deferred.reserve(32);
             int heap_checks = 0;
+            // 找到合适的 best_u
             while (!max_heap.empty() && heap_checks < max_heap_checks) {
                 GainEntry entry = max_heap.top();
                 max_heap.pop();
                 heap_checks++;
 
                 int u = entry.node;
-                if (locked[u]) {
+                if (locked[u]) { // 是否已经锁定
                     continue;
                 }
-                if (entry.version != gain_version[u]) {
+                if (entry.version != gain_version[u]) { // 数据版本是否过期
                     continue;
                 }
 
                 bool from_x = (part[u] == 0);
                 int w = hg.node_weight[u];
                 int new_wx = wx + (from_x ? -w : w);
-                if (new_wx < min_x || new_wx > max_x) {
-                    deferred.push_back(entry);
+                if (new_wx < min_x || new_wx > max_x) { // 移动后也要满足条件 min_x, max_x
+                    deferred.push_back(entry); // 不满足也暂存到 数组 deferred 
                     continue;
                 }
 
@@ -586,7 +610,7 @@ void fm_refine_sampled(const Hypergraph &hg,
             }
 
             if (best_u == -1) {
-                // Fallback: full scan to avoid missing feasible moves due heap check cap.
+                // 执行全量扫描，以避免因堆 内存检查 上限而漏掉可行的移动步骤（前面对堆的检查是有 max_heap_checks 限制的）
                 for (int u = 0; u < hg.n; ++u) {
                     if (locked[u]) {
                         continue;
@@ -611,12 +635,12 @@ void fm_refine_sampled(const Hypergraph &hg,
                 break;
             }
 
-            locked[best_u] = 1;
-            moves.push_back({best_u, best_from_side, best_gain});
-            apply_move(hg, best_u, part, count_x, count_y, wx, wy);
+            locked[best_u] = 1; // 找到合法最优后，锁定
+            moves.push_back({best_u, best_from_side, best_gain}); // 记录移动清单
+            apply_move(hg, best_u, part, count_x, count_y, wx, wy); // 修改它的阵营，更新体积和线网计数
 
-            dedup_stamp++;
-            vector<int> affected;
+            dedup_stamp++; // 时间戳
+            vector<int> affected; // 受影响的邻居
             for (int net_idx : hg.node_nets[best_u]) {
                 for (int v : hg.nets[net_idx]) {
                     if (locked[v]) {
@@ -630,13 +654,14 @@ void fm_refine_sampled(const Hypergraph &hg,
                 }
             }
 
+            // 受影响的邻居，更新 gain ，版本号 + 1
             for (int v : affected) {
                 gain[v] = -delta_cut_for_move(hg, v, part, count_x, count_y);
                 gain_version[v]++;
                 max_heap.push({gain[v], v, gain_version[v]});
             }
 
-            cumulative_gain += best_gain;
+            cumulative_gain += best_gain; // 累计收益
             if (cumulative_gain > best_prefix_gain) {
                 best_prefix_gain = cumulative_gain;
                 best_prefix_len = static_cast<int>(moves.size());
@@ -647,6 +672,7 @@ void fm_refine_sampled(const Hypergraph &hg,
             break;
         }
 
+        // 没有收益，回退
         if (best_prefix_gain <= 0) {
             for (int i = static_cast<int>(moves.size()) - 1; i >= 0; --i) {
                 rollback_move(hg,
@@ -661,6 +687,7 @@ void fm_refine_sampled(const Hypergraph &hg,
             break;
         }
 
+        // 中途有一刻收益达到了巅峰，就回退到那个点
         for (int i = static_cast<int>(moves.size()) - 1; i >= best_prefix_len; --i) {
             rollback_move(hg,
                           moves[i].node,
@@ -724,12 +751,14 @@ void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y) {
     mt19937 rng(42);
     auto deadline = chrono::steady_clock::now() + chrono::seconds(kTotalTimeBudgetSeconds);
 
+    // 构建超图结构
     vector<int> idx_to_id;
-    Hypergraph fine = build_fine_hypergraph(graph, idx_to_id);
+    Hypergraph fine = build_fine_hypergraph(graph, idx_to_id); // 最原始超图
 
     vector<char> best_part;
     int best_cut = numeric_limits<int>::max();
 
+    // kRestarts 多次重启
     for (int r = 0; r < kRestarts; ++r) {
         if (chrono::steady_clock::now() >= deadline) {
             break;
@@ -739,25 +768,29 @@ void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y) {
         vector<vector<int>> fine_to_coarse_maps;
         levels.push_back(fine);
 
+        // 粗化
         while (static_cast<int>(levels.size()) < kMaxLevels && chrono::steady_clock::now() < deadline) {
             const Hypergraph &curr = levels.back();
-            if (curr.n <= kMinCoarsestNodes) {
+            // 节点数量少于阈值 320，停止
+            if (curr.n <= kMinCoarsestNodes) { 
                 break;
             }
 
-            CoarsenResult cr = coarsen_once(curr, rng);
+            CoarsenResult cr = coarsen_once(curr, rng); // 合并节点，V 字形的左边
             if (cr.coarse.n <= 0 || cr.coarse.n >= curr.n) {
                 break;
             }
 
             double ratio = static_cast<double>(cr.coarse.n) / static_cast<double>(curr.n);
-            fine_to_coarse_maps.push_back(std::move(cr.fine_to_coarse));
-            levels.push_back(std::move(cr.coarse));
+            fine_to_coarse_maps.push_back(std::move(cr.fine_to_coarse)); // 映射记录，后面才能还原
+            levels.push_back(std::move(cr.coarse)); // 每粗化一次就存进 level
 
+            // 粗化缩减比例不够明显，stop
             if (ratio > kStopCoarsenRatio) {
                 break;
             }
         }
+
 
         int coarsest_level = static_cast<int>(levels.size()) - 1;
 
@@ -766,15 +799,17 @@ void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y) {
                 break;
             }
 
+            // 初始划分
             vector<char> part;
             if (init_mode == 0) {
-                part = init_degree_balanced_part(levels[coarsest_level], rng);
+                part = init_degree_balanced_part(levels[coarsest_level], rng); // 基于节点度的平衡划分
             } else if (init_mode == 1) {
-                part = init_random_balanced_part(levels[coarsest_level], rng);
+                part = init_random_balanced_part(levels[coarsest_level], rng); // 完全随机的平衡划分
             } else {
-                part = init_smallnet_balanced_part(levels[coarsest_level], rng);
+                part = init_smallnet_balanced_part(levels[coarsest_level], rng); // 倾向于保护小网（连接节点较少的线网）的平衡划分
             }
 
+            // fm_refine_sampled：FM算法的变体
             fm_refine_sampled(levels[coarsest_level],
                               part,
                               rng,
@@ -790,7 +825,8 @@ void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y) {
                               kCoarsePolishMaxSteps,
                               kCoarsePolishCandidate,
                               deadline);
-
+            
+            // 粗化结果映射到细化图中（倒序）
             for (int lv = coarsest_level - 1; lv >= 0; --lv) {
                 vector<char> finer_part(levels[lv].n, 1);
                 const vector<int> &map = fine_to_coarse_maps[lv];
@@ -813,7 +849,7 @@ void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y) {
                                       rng,
                                       kFinePolishPasses,
                                       kFinePolishMaxSteps,
-                                      kFinePolishCandidate,
+                                      kFinePolishCandidate, // 打磨过程
                                       deadline);
                 } else {
                     fm_refine_sampled(levels[lv],

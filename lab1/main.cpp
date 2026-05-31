@@ -32,7 +32,8 @@ int main(int argc, char **argv) {
     // 1. finish your partition algorithm
     // 2. output your partition result to a file
     // 3. evaluate your partition result
-    // for example
+
+    // 05-15 solution
 
     set<int> X;
     set<int> Y;
