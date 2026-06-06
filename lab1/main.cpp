@@ -32,13 +32,40 @@ int main(int argc, char **argv) {
     // 1. finish your partition algorithm
     // 2. output your partition result to a file
     // 3. evaluate your partition result
-    // for example
+
+    // 05-15 solution
 
     set<int> X;
     set<int> Y;
     solution.my_partition_algorithm(graph, X, Y);
 
-    cout << evaluate(graph, "./ibm01_partition.txt") << endl;
+    // 从输入路径上生成分区文件
+    string base_name = benchmark_name;
+    size_t slash_pos = base_name.find_last_of('/');
+    if (slash_pos != string::npos) {
+        base_name = base_name.substr(slash_pos + 1);
+    }
+    size_t dot_pos = base_name.find_last_of('.');
+    if (dot_pos != string::npos) {
+        base_name = base_name.substr(0, dot_pos);
+    }
+    string partition_file = base_name + "_partition.txt";
+
+    ofstream out(partition_file);
+    if (!out.is_open()) {
+        cerr << "Failed to open output file: " << partition_file << endl;
+        return -1;
+    }
+    for (int i = 1; i <= graph.get_node_num(); ++i) {
+        if (X.find(i) != X.end()) {
+            out << 0 << "\n";
+        } else {
+            out << 1 << "\n";
+        }
+    }
+    out.close();
+
+    cout << evaluate(graph, partition_file) << endl;
 
     return 0;
 }
