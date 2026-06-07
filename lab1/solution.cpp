@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <omp.h>      // OpenMP: #pragma omp parallel for, omp_get_max_threads()
 #include <queue>
 #include <random>
 #include <unordered_map>
@@ -12,7 +13,7 @@
 
 namespace {
 constexpr double kBalanceRatio = 0.02;
-constexpr int kRestarts = 8;
+constexpr int kRestarts = 8; //针对启发式优化，不同重启产生不同的搜索路径
 constexpr int kMaxLevels = 5;
 constexpr int kMinCoarsestNodes = 320;
 constexpr double kStopCoarsenRatio = 0.92;
@@ -34,10 +35,18 @@ constexpr int kFinePolishMaxSteps = 4500;
 constexpr int kCoarsePolishCandidate = 2500;
 constexpr int kMidPolishCandidate = 3200;
 constexpr int kFinePolishCandidate = 4500;
-constexpr int kTotalTimeBudgetSeconds = 90;
-constexpr int kHeavyNetLimit = 64;
-constexpr double kMatchDegreePenalty = 0.06;
-constexpr double kSmallNetBoost = 1.7;
+
+// 时间预算（基准值，实际在 my_partition_algorithm 中按图规模自适应）
+constexpr int kBudgetBaseTime = 90;        // 基准时间（秒），对应 ibm01 约 12k 节点
+constexpr int kBudgetBaseNodes = 12000;    // 基准节点数
+constexpr double kBudgetExponent = 0.8;    // 规模缩放指数（<1 为次线性）
+constexpr int kBudgetMinSeconds = 60;      // 最小预算
+constexpr int kBudgetMaxSeconds = 3600;    // 最大预算（1 小时）
+
+// 粗化过程关键变量
+constexpr int kHeavyNetLimit = 64; //用于限制粗化过程中net的选择
+constexpr double kMatchDegreePenalty = 0.06; //控制候选节点评分，保证候选节点度数越高，评分越低
+constexpr double kSmallNetBoost = 1.7; //如果一个net大小较小就加权，因为net越小越能体现强相关
 constexpr int kInitModeCount = 3;
 
 struct Hypergraph {
@@ -171,7 +180,7 @@ CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
         for (int net_idx : fine.node_nets[u]) {
             const auto &nodes = fine.nets[net_idx];
             int net_size = static_cast<int>(nodes.size());
-            // 过滤掉连接了太多节点的线网
+            // 过滤掉连接了太多节点的线网，因为小net更能够说明节点之间关系紧密
             if (net_size > kHeavyNetLimit || net_size <= 1) {
                 continue;
             }
@@ -243,7 +252,8 @@ CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
     return result;
 }
 
-// 节点度排序后划分
+// 接下来是三种划分方式
+// 1.节点度排序后划分
 vector<char> init_degree_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     vector<char> part(hg.n, 1);
     vector<int> order(hg.n);
@@ -289,7 +299,7 @@ vector<char> init_degree_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     return part;
 }
 
-// 随机划分
+// 2.随机划分
 vector<char> init_random_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     vector<char> part(hg.n, 1);
     vector<int> order(hg.n);
@@ -338,7 +348,7 @@ vector<char> init_random_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     return part;
 }
 
-// 小线网保护的平衡划分
+// 3.小线网保护的平衡划分
 vector<char> init_smallnet_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     vector<char> part(hg.n, 1);
     vector<double> score(hg.n, 0.0);
@@ -507,6 +517,21 @@ void rollback_move(const Hypergraph &hg,
     }
 }
 
+// FM原理：
+// 重复若干 pass：
+//     计算当前每条 net 的 X/Y 计数
+//     计算每个节点移动到对侧的 gain
+//     把所有节点放进最大堆
+
+//     本 pass 内重复若干 step：
+//         从堆中找 gain 最大且满足平衡约束的节点
+//         移动该节点，并锁定
+//         只更新受影响邻居的 gain
+//         记录累计 gain 和最佳前缀
+
+//     pass 结束：
+//         如果没有正收益，全部回滚并停止
+//         否则只保留最佳收益前缀，回滚后缀
 void fm_refine_sampled(const Hypergraph &hg,
                        vector<char> &part,
                        mt19937 &rng,
@@ -524,6 +549,7 @@ void fm_refine_sampled(const Hypergraph &hg,
     int max_x = 0;
     compute_balance_bounds(total_weight, min_x, max_x);
 
+    // 确定每轮步数与堆检查上限
     int steps = min(step_limit, hg.n);
     int max_heap_checks = max(64, candidate_size);
     vector<int> dedup_mark(hg.n, -1);
@@ -548,21 +574,27 @@ void fm_refine_sampled(const Hypergraph &hg,
         int wy = total_weight - wx;
 
         vector<char> locked(hg.n, 0);
-        vector<MoveRecord> moves;
+        vector<MoveRecord> moves; //移动记录，后续方便回溯找到能收获最大gain的移动过程
         moves.reserve(steps);
 
         vector<int> gain(hg.n, numeric_limits<int>::min());
         vector<int> gain_version(hg.n, 0);
-        priority_queue<GainEntry, vector<GainEntry>, GainEntryCmp> max_heap;
+        
+        //记录gain的最大堆
+        //GainEntry是堆里的元素，成员包括gain、node索引以及版本version（为了解决maxheap不能直接更新）
+        priority_queue<GainEntry, vector<GainEntry>, GainEntryCmp> max_heap; 
 
         for (int u = 0; u < hg.n; ++u) {
             gain[u] = -delta_cut_for_move(hg, u, part, count_x, count_y); // 如果移动到对面，能减少多少割线
             max_heap.push({gain[u], u, gain_version[u]});
         }
 
-        int cumulative_gain = 0;
-        int best_prefix_gain = 0;
-        int best_prefix_len = 0;
+        int cumulative_gain = 0; //当前已经执行的移动序列的累计收益
+        int best_prefix_gain = 0; //到目前为止，累计收益最大的前缀收益
+        int best_prefix_len = 0; //最佳前缀包含多少步移动
+        // 例如移动gain是{3，-2，4，-10}
+        // 累计收益为{3.1，5，-5}
+        // 则best_prefix_gain=5，best_prefix_len=3，最后保留前三步回滚第四步
 
         // 进行 steps 次节点移动
         for (int step = 0; step < steps; ++step) {
@@ -599,6 +631,7 @@ void fm_refine_sampled(const Hypergraph &hg,
                     continue;
                 }
 
+                // 由于堆顶是gain最大的，找到第一个合法候选就可以作为本步最优选择
                 best_u = u;
                 best_gain = entry.gain;
                 best_from_side = part[u];
@@ -631,6 +664,7 @@ void fm_refine_sampled(const Hypergraph &hg,
                 }
             }
 
+            // 没有任何合法移动就结束本轮pass
             if (best_u == -1) {
                 break;
             }
@@ -654,7 +688,7 @@ void fm_refine_sampled(const Hypergraph &hg,
                 }
             }
 
-            // 受影响的邻居，更新 gain ，版本号 + 1
+            // 受影响的邻居，更新 gain ，版本号 + 1，这样比重新计算所有节点的gain快很多
             for (int v : affected) {
                 gain[v] = -delta_cut_for_move(hg, v, part, count_x, count_y);
                 gain_version[v]++;
@@ -708,6 +742,157 @@ int evaluate_cut(const Hypergraph &hg, const vector<char> &part) {
     return cut_from_counts(count_x, count_y);
 }
 
+// ============================================================================
+// Multi-thread result type
+// ============================================================================
+
+// RestartResult -- return value of a single restart.
+// In the serial version, each restart's best partition was written directly
+// into the outer loop's best_part/best_cut. In the multi-threaded version,
+// each worker runs independently and cannot write to shared global variables.
+// So we encapsulate one restart's output into this struct and return it to
+// the caller (who merges results after the parallel region).
+// Thread safety: each worker constructs its own RestartResult; no other
+// thread accesses it concurrently, so no internal locking is needed.
+struct RestartResult {
+    vector<char> part;   // best partition of this restart (internal index)
+    int cut = numeric_limits<int>::max();
+};
+
+// run_one_restart -- execute one complete random restart.
+// Semantically equivalent to the body of the original serial loop:
+//   for (int r = 0; r < kRestarts; ++r) { ... }
+// Extracting it as a standalone function is the key refactoring step
+// that enables multi-threading.
+//
+// Thread-safety design:
+//   restart_id  -- by value, each thread has its own copy
+//   fine        -- const ref, shared read-only; built once before any
+//                  worker starts, never modified thereafter
+//   deadline    -- by value (time_point is trivially copyable), each
+//                  thread gets the same absolute time point
+//   rng         -- thread-local mt19937, seed bound to restart_id
+//   levels      -- thread-local vector, independent coarse hierarchy
+//   part        -- thread-local partition vector
+//
+// Random seed: 42 + restart_id * 1000 guarantees:
+//   1) different restart_id yields completely disjoint random sequences
+//   2) deterministic reproducibility for the same restart_id
+//
+// Time budget: all threads share the same deadline and check it in their
+// loops: if (chrono::steady_clock::now() >= deadline) break;
+RestartResult run_one_restart(int restart_id,
+                               const Hypergraph &fine,
+                               chrono::steady_clock::time_point deadline) {
+    mt19937 rng(42 + restart_id * 1000); // 每个重启使用独立随机种子，保证可复现
+
+    // 粗化阶段
+    vector<Hypergraph> levels;
+    vector<vector<int>> fine_to_coarse_maps;
+    levels.push_back(fine);
+
+    while (static_cast<int>(levels.size()) < kMaxLevels &&
+           chrono::steady_clock::now() < deadline) {
+        const Hypergraph &curr = levels.back();
+        if (curr.n <= kMinCoarsestNodes) {
+            break;
+        }
+
+        CoarsenResult cr = coarsen_once(curr, rng);
+        if (cr.coarse.n <= 0 || cr.coarse.n >= curr.n) {
+            break;
+        }
+
+        double ratio = static_cast<double>(cr.coarse.n) / static_cast<double>(curr.n);
+        fine_to_coarse_maps.push_back(std::move(cr.fine_to_coarse));
+        levels.push_back(std::move(cr.coarse));
+
+        if (ratio > kStopCoarsenRatio) {
+            break;
+        }
+    }
+
+    int coarsest_level = static_cast<int>(levels.size()) - 1;
+
+    // 当前重启跟踪自己的最佳结果（无需锁）
+    vector<char> local_best_part;
+    int local_best_cut = numeric_limits<int>::max();
+
+    for (int init_mode = 0; init_mode < kInitModeCount; ++init_mode) {
+        if (chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+
+        // 初始划分
+        vector<char> part;
+        switch (init_mode) {
+        case 0:
+            part = init_degree_balanced_part(levels[coarsest_level], rng);
+            break;
+        case 1:
+            part = init_random_balanced_part(levels[coarsest_level], rng);
+            break;
+        default:
+            part = init_smallnet_balanced_part(levels[coarsest_level], rng);
+            break;
+        }
+
+        // 粗层 FM
+        fm_refine_sampled(levels[coarsest_level], part, rng,
+                          kCoarseFmPasses, kCoarseMaxSteps,
+                          kCoarseCandidateSize, deadline);
+        fm_refine_sampled(levels[coarsest_level], part, rng,
+                          kCoarsePolishPasses, kCoarsePolishMaxSteps,
+                          kCoarsePolishCandidate, deadline);
+
+        // 逐层反粗化
+        for (int lv = coarsest_level - 1; lv >= 0; --lv) {
+            if (chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+
+            vector<char> finer_part(levels[lv].n, 1);
+            const vector<int> &map = fine_to_coarse_maps[lv];
+            for (int u = 0; u < levels[lv].n; ++u) {
+                finer_part[u] = part[map[u]];
+            }
+            part.swap(finer_part);
+
+            if (lv == 0) {
+                fm_refine_sampled(levels[lv], part, rng,
+                                  kFineFmPasses, kFineMaxSteps,
+                                  kFineCandidateSize, deadline);
+                fm_refine_sampled(levels[lv], part, rng,
+                                  kFinePolishPasses, kFinePolishMaxSteps,
+                                  kFinePolishCandidate, deadline);
+            } else {
+                fm_refine_sampled(levels[lv], part, rng,
+                                  kMidFmPasses, kMidMaxSteps,
+                                  kMidCandidateSize, deadline);
+                fm_refine_sampled(levels[lv], part, rng,
+                                  kMidPolishPasses, kMidPolishMaxSteps,
+                                  kMidPolishCandidate, deadline);
+            }
+        }
+
+        if (chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+
+        int cut = evaluate_cut(fine, part);
+        if (cut < local_best_cut) {
+            local_best_cut = cut;
+            local_best_part = std::move(part);
+        }
+    }
+
+    if (local_best_part.empty()) {
+        local_best_part.assign(fine.n, 1);
+    }
+
+    return {std::move(local_best_part), local_best_cut};
+}
+
 }  // namespace
 
 void Solution::read_benchmark(Graph &graph, string benchmark_name) {
@@ -718,12 +903,23 @@ void Solution::read_benchmark(Graph &graph, string benchmark_name) {
         exit(-1);
     }
 
-    int edge_num, node_num;
+    // --- ICCAD 2021 format ---
+    // Line 1: <num_nodes>
+    // Line 2: <num_nets>
+    // Lines 3 .. 3+num_nets-1: each line is one net, <node_id> <node_id> ...
+    // Remaining lines: fixed nodes per FPGA (not needed for bipartitioning)
+    // Note: Node IDs are 0-based in the file; we convert to 1-based internally.
+    int node_num, edge_num;
     string line;
     getline(file >> ws, line);
     istringstream iss(line);
-    iss >> edge_num;
     iss >> node_num;
+
+    getline(file >> ws, line);
+    istringstream iss2(line);
+    iss2 >> edge_num;
+
+    (void)node_num;  // informational only
 
     for(int i = 0; i < edge_num; i++) {
         getline(file, line);
@@ -733,159 +929,101 @@ void Solution::read_benchmark(Graph &graph, string benchmark_name) {
         Net *net = graph.add_net(i);
 
         while(iss >> node_id) {
+            node_id++;  // convert 0-based to 1-based indexing
             Node *node = graph.get_or_create_node(node_id);
             node->add_net(net);
             net->add_node(node);
         }
     }
 
+    // The remaining lines (fixed nodes per FPGA) are not needed.
+    // Closing the file; unread lines are harmless.
     file.close();
 }
 
-// Two-level multilevel partition:
-// 1) Coarsen once
-// 2) FM on coarse graph
-// 3) Uncoarsen
-// 4) FM on fine graph
-void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y) {
-    mt19937 rng(42);
-    auto deadline = chrono::steady_clock::now() + chrono::seconds(kTotalTimeBudgetSeconds);
+void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y,
+                                      unsigned int num_threads) {
+    // --- Step 1: determine parallelism ---
+    // If num_threads == 0, use OpenMP's default (usually = CPU core count).
+    if (num_threads == 0) {
+        num_threads = omp_get_max_threads();
+    }
+    if (num_threads == 0) {
+        num_threads = 1;
+    }
 
-    // 构建超图结构
+    // --- Step 2: build read-only global data ---
+    // fine Hypergraph: read-only after construction, shared safely among threads.
     vector<int> idx_to_id;
-    Hypergraph fine = build_fine_hypergraph(graph, idx_to_id); // 最原始超图
+    Hypergraph fine = build_fine_hypergraph(graph, idx_to_id);
 
+    // --- Step 3: adaptive time budget ---
+    // Instead of a fixed wall-clock deadline, we scale the budget with the
+    // problem size. Larger graphs need proportionally more time per restart.
+    //
+    // Formula: budget = kBudgetBaseTime * (N / kBudgetBaseNodes)^kBudgetExponent
+    //   - Sub-linear exponent (0.8) accounts for coarse hierarchy reducing
+    //     effective problem size at each level.
+    //   - Clamped to [kBudgetMinSeconds, kBudgetMaxSeconds].
+    //
+    // Examples (approximate):
+    //   Nodes     | Budget (s)
+    //   ----------|-----------
+    //    12k      |   90        (ibm01, baseline)
+    //    50k      |  287        (~5 min)
+    //   100k      |  499        (~8 min)
+    //   300k      | 1243        (~21 min, case1 size)
+    int64_t budget_seconds = kBudgetBaseTime;
+    if (fine.n > kBudgetBaseNodes) {
+        double ratio = static_cast<double>(fine.n) / static_cast<double>(kBudgetBaseNodes);
+        budget_seconds = static_cast<int64_t>(static_cast<double>(kBudgetBaseTime)
+                                              * pow(ratio, kBudgetExponent));
+    }
+    budget_seconds = max<int64_t>(budget_seconds, kBudgetMinSeconds);
+    budget_seconds = min<int64_t>(budget_seconds, kBudgetMaxSeconds);
+
+    auto deadline = chrono::steady_clock::now() + chrono::seconds(budget_seconds);
+
+    // --- Step 4: OpenMP parallel execution ---
+    // Pre-allocate one result slot per restart. Each thread writes to its
+    // own slot (results[r]) where r is the private loop index.
+    // Since different threads always access different indices, no locking
+    // is needed during parallel execution.
+    vector<RestartResult> results(kRestarts);
+
+    // OpenMP parallel for:
+    //   num_threads(n)  —  worker thread count
+    //   schedule(dynamic)  —  finished threads pick up the next pending
+    //                         restart automatically (load balancing).
+    //
+    // Variable sharing analysis (OpenMP default rules):
+    //   results      —  shared (each thread writes results[r] with distinct r)
+    //   fine         —  shared (read-only, safe)
+    //   deadline     —  shared (read-only, safe)
+    //   r            —  private (loop counter, handled automatically by OpenMP)
+    //   run_one_restart() internals are all thread-local (stack-allocated)
+    #pragma omp parallel for num_threads(num_threads) schedule(dynamic)
+    for (int r = 0; r < kRestarts; ++r) {
+        results[r] = run_one_restart(r, fine, deadline);
+    }
+
+    // --- Step 5: sequential merge ---
+    // (Trivial compared to the parallel work; no need to parallelize.)
     vector<char> best_part;
     int best_cut = numeric_limits<int>::max();
-
-    // kRestarts 多次重启
-    for (int r = 0; r < kRestarts; ++r) {
-        if (chrono::steady_clock::now() >= deadline) {
-            break;
-        }
-
-        vector<Hypergraph> levels;
-        vector<vector<int>> fine_to_coarse_maps;
-        levels.push_back(fine);
-
-        // 粗化
-        while (static_cast<int>(levels.size()) < kMaxLevels && chrono::steady_clock::now() < deadline) {
-            const Hypergraph &curr = levels.back();
-            // 节点数量少于阈值 320，停止
-            if (curr.n <= kMinCoarsestNodes) { 
-                break;
-            }
-
-            CoarsenResult cr = coarsen_once(curr, rng); // 合并节点，V 字形的左边
-            if (cr.coarse.n <= 0 || cr.coarse.n >= curr.n) {
-                break;
-            }
-
-            double ratio = static_cast<double>(cr.coarse.n) / static_cast<double>(curr.n);
-            fine_to_coarse_maps.push_back(std::move(cr.fine_to_coarse)); // 映射记录，后面才能还原
-            levels.push_back(std::move(cr.coarse)); // 每粗化一次就存进 level
-
-            // 粗化缩减比例不够明显，stop
-            if (ratio > kStopCoarsenRatio) {
-                break;
-            }
-        }
-
-
-        int coarsest_level = static_cast<int>(levels.size()) - 1;
-
-        for (int init_mode = 0; init_mode < kInitModeCount; ++init_mode) {
-            if (chrono::steady_clock::now() >= deadline) {
-                break;
-            }
-
-            // 初始划分
-            vector<char> part;
-            if (init_mode == 0) {
-                part = init_degree_balanced_part(levels[coarsest_level], rng); // 基于节点度的平衡划分
-            } else if (init_mode == 1) {
-                part = init_random_balanced_part(levels[coarsest_level], rng); // 完全随机的平衡划分
-            } else {
-                part = init_smallnet_balanced_part(levels[coarsest_level], rng); // 倾向于保护小网（连接节点较少的线网）的平衡划分
-            }
-
-            // fm_refine_sampled：FM算法的变体
-            fm_refine_sampled(levels[coarsest_level],
-                              part,
-                              rng,
-                              kCoarseFmPasses,
-                              kCoarseMaxSteps,
-                              kCoarseCandidateSize,
-                              deadline);
-
-            fm_refine_sampled(levels[coarsest_level],
-                              part,
-                              rng,
-                              kCoarsePolishPasses,
-                              kCoarsePolishMaxSteps,
-                              kCoarsePolishCandidate,
-                              deadline);
-            
-            // 粗化结果映射到细化图中（倒序）
-            for (int lv = coarsest_level - 1; lv >= 0; --lv) {
-                vector<char> finer_part(levels[lv].n, 1);
-                const vector<int> &map = fine_to_coarse_maps[lv];
-                for (int u = 0; u < levels[lv].n; ++u) {
-                    finer_part[u] = part[map[u]];
-                }
-                part.swap(finer_part);
-
-                if (lv == 0) {
-                    fm_refine_sampled(levels[lv],
-                                      part,
-                                      rng,
-                                      kFineFmPasses,
-                                      kFineMaxSteps,
-                                      kFineCandidateSize,
-                                      deadline);
-
-                    fm_refine_sampled(levels[lv],
-                                      part,
-                                      rng,
-                                      kFinePolishPasses,
-                                      kFinePolishMaxSteps,
-                                      kFinePolishCandidate, // 打磨过程
-                                      deadline);
-                } else {
-                    fm_refine_sampled(levels[lv],
-                                      part,
-                                      rng,
-                                      kMidFmPasses,
-                                      kMidMaxSteps,
-                                      kMidCandidateSize,
-                                      deadline);
-
-                    fm_refine_sampled(levels[lv],
-                                      part,
-                                      rng,
-                                      kMidPolishPasses,
-                                      kMidPolishMaxSteps,
-                                      kMidPolishCandidate,
-                                      deadline);
-                }
-
-                if (chrono::steady_clock::now() >= deadline) {
-                    break;
-                }
-            }
-
-            int cut = evaluate_cut(fine, part);
-            if (cut < best_cut) {
-                best_cut = cut;
-                best_part = part;
-            }
+    for (auto &res : results) {
+        if (res.cut < best_cut) {
+            best_cut = res.cut;
+            best_part = std::move(res.part);
         }
     }
 
+    // --- Step 6: fallback ---
     if (best_part.empty()) {
         best_part.assign(fine.n, 1);
     }
 
+    // --- Step 7: convert result ---
     X.clear();
     Y.clear();
     for (int u = 0; u < fine.n; ++u) {

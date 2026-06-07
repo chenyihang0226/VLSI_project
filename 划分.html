@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<!-- saved from url=(0086)https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  
+  <title>划分</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+  <meta name="description" content="Description">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+  <link rel="stylesheet" href="./划分_files/vue.css">
+<style type="text/css">.docsify-copy-code-button,.docsify-copy-code-button>span{cursor:pointer;transition:all .25s ease}.docsify-copy-code-button{background:grey;background:var(--theme-color,grey);border:0;border-radius:0;color:#fff;font-size:1em;opacity:0;outline:0;overflow:visible;padding:.65em .8em;position:absolute;right:0;top:0;z-index:1}.docsify-copy-code-button>span{background:inherit;border-radius:3px;pointer-events:none}.docsify-copy-code-button>.error,.docsify-copy-code-button>.success{font-size:.825em;opacity:0;padding:.5em .65em;position:absolute;right:0;top:50%;transform:translateY(-50%);z-index:-100}.docsify-copy-code-button.error>.error,.docsify-copy-code-button.success>.success{opacity:1;right:100%;transform:translate(-25%,-50%)}.docsify-copy-code-button:focus,pre:hover .docsify-copy-code-button{opacity:1}.docsify-copy-code-button>[aria-live]{height:1px;left:-10000px;overflow:hidden;position:absolute;top:auto;width:1px}</style><style>
+.sidebar {
+  padding-top: 0;
+}
+
+.search {
+  margin-bottom: 20px;
+  padding: 6px;
+  border-bottom: 1px solid #eee;
+}
+
+.search .input-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.search .results-panel {
+  display: none;
+}
+
+.search .results-panel.show {
+  display: block;
+}
+
+.search input {
+  outline: none;
+  border: none;
+  width: 100%;
+  padding: 0.6em 7px;
+  font-size: inherit;
+  border: 1px solid transparent;
+}
+
+.search input:focus {
+  box-shadow: 0 0 5px var(--theme-color, #42b983);
+  border: 1px solid var(--theme-color, #42b983);
+}
+
+.search input::-webkit-search-decoration,
+.search input::-webkit-search-cancel-button,
+.search input {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+}
+
+.search input::-ms-clear {
+  display: none;
+  height: 0;
+  width: 0;
+}
+
+.search .clear-button {
+  cursor: pointer;
+  width: 36px;
+  text-align: right;
+  display: none;
+}
+
+.search .clear-button.show {
+  display: block;
+}
+
+.search .clear-button svg {
+  transform: scale(.5);
+}
+
+.search h2 {
+  font-size: 17px;
+  margin: 10px 0;
+}
+
+.search a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.search .matching-post {
+  border-bottom: 1px solid #eee;
+}
+
+.search .matching-post:last-child {
+  border-bottom: 0;
+}
+
+.search p {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.search p.empty {
+  text-align: center;
+}
+
+.app-name.hide, .sidebar-nav.hide {
+  display: none;
+}</style></head>
+<body data-page="advanced/partition_problem_advanced.md" class="ready sticky">
+  <a href="https://github.com/Customized-Computing/VLSI-FPGA" target="_blank" class="github-corner" aria-label="View source on Github"><svg viewBox="0 0 250 250" aria-hidden="true"><path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path><path d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2" fill="currentColor" style="transform-origin: 130px 106px;" class="octo-arm"></path><path d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.5 C139.8,137.7 141.6,141.9 141.8,141.8 Z" fill="currentColor" class="octo-body"></path></svg></a><main><button class="sidebar-toggle" aria-label="Menu"><div class="sidebar-toggle-button"><span></span><span></span><span></span></div></button><aside class="sidebar"><div class="search"><div class="input-wrap">
+      <input type="search" value="" aria-label="Search text" placeholder="Type to search">
+      <div class="clear-button">
+        <svg width="26" height="24">
+          <circle cx="12" cy="12" r="11" fill="#ccc"></circle>
+          <path stroke="white" stroke-width="2" d="M8.25,8.25,15.75,15.75"></path>
+          <path stroke="white" stroke-width="2" d="M8.25,15.75,15.75,8.25"></path>
+        </svg>
+      </div>
+    </div>
+    <div class="results-panel"></div>
+    </div><h1 class="app-name"><a class="app-name-link" data-nosearch="" href="https://customized-computing.github.io/VLSI-FPGA/">VLSI课程实验文档</a></h1><div class="sidebar-nav"><!-- _sidebar.md -->
+
+<ul><li><a href="https://customized-computing.github.io/VLSI-FPGA/#/" title="主页">主页</a></li><li>实验一<ul><li><a href="https://customized-computing.github.io/VLSI-FPGA/#/lab1/lab1_problem" title="实验要求">实验要求</a></li></ul></li><li>实验二<ul><li><a href="https://customized-computing.github.io/VLSI-FPGA/#/lab2/lab2_problem" title="实验要求">实验要求</a></li></ul></li><li>实验三<ul><li><a href="https://customized-computing.github.io/VLSI-FPGA/#/lab3/lab3_problem" title="实验要求">实验要求</a></li></ul></li><li>大作业<ul><li><a href="https://customized-computing.github.io/VLSI-FPGA/#/labFinal" title="大作业说明">大作业说明</a></li><li class=""><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced" title="划分">划分</a><ul class="app-sub-sidebar"><li class="active"><a class="section-link" href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=_1-%e5%b9%b6%e8%a1%8c%e5%8c%96%e4%bd%a0%e7%9a%84%e5%88%92%e5%88%86%e7%ae%97%e6%b3%95" title="1. 并行化你的划分算法">1. 并行化你的划分算法</a></li><li class=""><a class="section-link" href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=_2-%e5%a4%9a%e8%b7%af%e5%88%92%e5%88%86" title="2. 多路划分">2. 多路划分</a></li><li class=""><a class="section-link" href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=_3-%e6%8b%93%e6%89%91%e7%ba%a6%e6%9d%9f" title="3. 拓扑约束">3. 拓扑约束</a></li><ul class="app-sub-sidebar"><li class=""><a class="section-link" href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=%e8%be%93%e5%85%a5%e6%96%87%e4%bb%b6%e8%af%b4%e6%98%8e" title="输入文件说明">输入文件说明</a></li></ul><li class=""><a class="section-link" href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=_4-%e5%9b%ba%e5%ae%9a%e7%ba%a6%e6%9d%9f" title="4. 固定约束">4. 固定约束</a></li><li class=""><a class="section-link" href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=%e9%99%84%e5%bd%95" title="附录">附录</a></li><ul class="app-sub-sidebar"><li class=""><a class="section-link" href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=%e6%8b%93%e6%89%91%e7%ba%a6%e6%9d%9f%e8%af%b4%e6%98%8e" title="拓扑约束说明">拓扑约束说明</a></li><li class=""><a class="section-link" href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=baseline" title="baseline">baseline</a></li></ul></ul></li><li><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/floorplan_problem_advanced" title="布图">布图</a></li><li><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/placement_problem_advanced" title="布局">布局</a></li><li><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/routing_problem_advanced" title="布线">布线</a></li></ul></li></ul></div></aside><section class="content"><article class="markdown-section" id="main"><h1 id="划分进阶"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=%e5%88%92%e5%88%86%e8%bf%9b%e9%98%b6" data-id="划分进阶" class="anchor"><span>划分——进阶</span></a></h1><p><mark>注意：进阶要求是面向大作业的，同学们选择划分作为大作业内容时，可以选择完成以下提到的要求。</mark><br>
+<mark>注意：连同代码和论文一起提交，并且写一个简要的README文件，说明如何复现你的实验结果。</mark><br>
+在这个实验中，你需要优化你的划分(partition)算法。</p><blockquote>
+<p>完成的需求越多，你的大作业成绩也会越高。<br>
+以下需求是一个层层递进的关系（除了并行化）。只完成第三个需求，也足够拿到大作业的所有分数。</p></blockquote>
+<h2 id="_1-并行化你的划分算法"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=_1-%e5%b9%b6%e8%a1%8c%e5%8c%96%e4%bd%a0%e7%9a%84%e5%88%92%e5%88%86%e7%ae%97%e6%b3%95" data-id="_1-并行化你的划分算法" class="anchor"><span>1. 并行化你的划分算法</span></a></h2><p>改造实验一中实现的算法，使得它适应多线程计算。</p><p>在大作业论文中，你需要说明你的并行化思路，以及并行化的加速比。<br>
+<mark>注意，算法稳定性是重要衡量指标，要求固定随机数种子的情况下，你的算法输出应该是一致的。</mark></p><h2 id="_2-多路划分"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=_2-%e5%a4%9a%e8%b7%af%e5%88%92%e5%88%86" data-id="_2-多路划分" class="anchor"><span>2. 多路划分</span></a></h2><p>改造实验一中的算法，使得它适应多路划分。例如三路划分，你的算法能把网表划分成三个不同的部分，使得整体的割代价最小。</p><p>在大作业论文中，你需要简要说明你的算法思路。</p><ul><li>(可选)你的程序允许设置划分均衡的参数<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>r</mi><mo>∈</mo><mo stretchy="false">[</mo><mn>0</mn><mo separator="true">,</mo><mn>1</mn><mi mathvariant="normal">/</mi><mi>n</mi><mo stretchy="false">]</mo></mrow><annotation encoding="application/x-tex">r\in[0,1/n]</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.5782em;vertical-align:-0.0391em;"></span><span class="mord mathnormal" style="margin-right:0.0278em;">r</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">∈</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mopen">[</span><span class="mord">0</span><span class="mpunct">,</span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord">1/</span><span class="mord mathnormal">n</span><span class="mclose">]</span></span></span></span>，其中<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>n</mi></mrow><annotation encoding="application/x-tex">n</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.4306em;"></span><span class="mord mathnormal">n</span></span></span></span>是划分的数量，要求每个划分，被分配的元件数量占全部元件数量的比例不小于<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>r</mi></mrow><annotation encoding="application/x-tex">r</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.4306em;"></span><span class="mord mathnormal" style="margin-right:0.0278em;">r</span></span></span></span>。<ul><li>你需要特别注意当<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>r</mi><mo>×</mo><mi>n</mi><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">r\times n=1</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6667em;vertical-align:-0.0833em;"></span><span class="mord mathnormal" style="margin-right:0.0278em;">r</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:0.4306em;"></span><span class="mord mathnormal">n</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">1</span></span></span></span>时，你的程序不能崩溃或无法完成任务。</li><li>如果总元件数量不可以被<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>n</mi></mrow><annotation encoding="application/x-tex">n</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.4306em;"></span><span class="mord mathnormal">n</span></span></span></span>整除，允许节点之间的元件数量相差1（例如<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>r</mi><mo>=</mo><mn>0.5</mn></mrow><annotation encoding="application/x-tex">r=0.5</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.4306em;"></span><span class="mord mathnormal" style="margin-right:0.0278em;">r</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">0.5</span></span></span></span>，但是元件总数量为奇数个）。</li></ul></li></ul><h2 id="_3-拓扑约束"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=_3-%e6%8b%93%e6%89%91%e7%ba%a6%e6%9d%9f" data-id="_3-拓扑约束" class="anchor"><span>3. 拓扑约束</span></a></h2><p>给定一个网表和划分的目标对象，你需要最小化多个划分之间的割代价，同时尽可能保证多个划分的平衡。</p><p>你的划分需要考虑节点之间的拓扑约束信息，划分结果不能违反拓扑约束，你可以在附录的<code>拓扑约束</code>一节找到拓扑约束的相关说明。</p><h3 id="输入文件说明"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=%e8%be%93%e5%85%a5%e6%96%87%e4%bb%b6%e8%af%b4%e6%98%8e" data-id="输入文件说明" class="anchor"><span>输入文件说明</span></a></h3><p>数据集下载链接：<a href="http://172.18.233.211:5244/VLSI/VLSI%E8%AF%BE%E7%A8%8B/dataset/partition" target="_blank" rel="noopener">校内链接(ICCAD2021-TopoPart-Benchmarks.zip)</a>和<a href="https://drive.google.com/drive/folders/14cXR0dZA-3H5BY0BcZ6KFvDf4E1NeTon" target="_blank" rel="noopener">校外链接(Google Drive)</a>。</p><p><code>ICCAD2021-TopoPart-Benchmarks.zip</code>包含三个文件，文件<code>FPGA Graph.zip</code>是划分的拓扑信息，<code>Generated Benchmarks.zip</code>和<code>Titan23 Benchmarks.zip</code>是网表相关信息。</p><h4 id="拓扑划分"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=%e6%8b%93%e6%89%91%e5%88%92%e5%88%86" data-id="拓扑划分" class="anchor"><span>拓扑划分</span></a></h4><p>打开文件<code>MSF1</code>你将会见到的划分拓扑信息如下：</p><pre v-pre="" data-lang="text"><code class="lang-text">8 11
+0 1
+0 4
+0 6
+1 2
+1 5
+1 6
+2 7
+3 7
+4 5
+5 6
+6 7</code><button class="docsify-copy-code-button"><span class="label">Copy to clipboard</span><span class="error" aria-hidden="hidden">Error</span><span class="success" aria-hidden="hidden">Copied</span><span aria-live="polite"></span></button></pre><ol><li>第一行两个数字分别代表拓扑图的节点数和边数。例如这个图有8个节点，11条边。</li><li>接下来的每一行代表一条边，每一行两个数字代表这条边的两个端点编号。例如这张图的边有11条，文件有11行。</li></ol><p>如果我们把以上信息画成图，我们可以得到以下的结果：</p><img width="400" alt="1" src="./划分_files/topo-MFS1.png" style="margin: auto; display: flex;">
+
+<h4 id="网表相关信息"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=%e7%bd%91%e8%a1%a8%e7%9b%b8%e5%85%b3%e4%bf%a1%e6%81%af" data-id="网表相关信息" class="anchor"><span>网表相关信息</span></a></h4><p>打开<code>Generated Benchmark.zip</code>的<code>case1</code>你将会见到的网表相关信息如下：</p><pre v-pre="" data-lang="text"><code class="lang-text">300000
+749091
+212496 250542
+85805 88841
+4047 221825
+99901 129256
+215074 8529
+200758 78824
+128700 186666
+276356 131687
+...
+# 从749093行开始
+3847 67234 98456
+12345 67890
+...</code><button class="docsify-copy-code-button"><span class="label">Copy to clipboard</span><span class="error" aria-hidden="hidden">Error</span><span class="success" aria-hidden="hidden">Copied</span><span aria-live="polite"></span></button></pre><ol><li>第一行一个数字代表网表的节点数。例如这个图有300000个节点。</li><li>第二行一个数字代表网表的边数。例如这个图有749091条边。</li><li>接下来的每一行代表一条边，每一行两个数字代表这条边的两个端点编号。例如这张图的边有749091条，除去最开始的两行，文件还有749091行。</li><li>从749093行开始，每一行代表代表固定节点的信息。第一行有三个数字，分别代表3847、67234、98456三个元件固定在拓朴图的节点0上。第二行有两个数字，分别代表12345、67890两个元件固定在拓朴图的节点1上。</li></ol><p><mark>注意：生成测试数据集时使用<code>MFS2</code>的拓朴图，如果要迁移到<code>MFS1</code>上，你需要忽略倒数35行的数据。</mark></p><p><mark>你必须先实现<strong>多路划分</strong>，才能实现拓扑约束。</mark></p><h2 id="_4-固定约束"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=_4-%e5%9b%ba%e5%ae%9a%e7%ba%a6%e6%9d%9f" data-id="_4-固定约束" class="anchor"><span>4. 固定约束</span></a></h2><p>以<code>MSF1</code>的拓朴图为例。假设元件1和元件2被固定在节点0上，那么你的算法输出时，元件1和元件2必须被划分到节点0上。</p><h2 id="附录"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=%e9%99%84%e5%bd%95" data-id="附录" class="anchor"><span>附录</span></a></h2><p>介绍一些基本背景和知识点，方便同学们更好地理解本课题，减少同学们的学习成本。</p><h3 id="拓扑约束说明"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=%e6%8b%93%e6%89%91%e7%ba%a6%e6%9d%9f%e8%af%b4%e6%98%8e" data-id="拓扑约束说明" class="anchor"><span>拓扑约束说明</span></a></h3><p>以<code>MSF1</code>的拓朴图为例。假设元件0和元件1相连、元件2和元件3相连。且划分算法把他们按照以下示例图所示的位置进行划分。</p><img width="400" alt="1" src="./划分_files/topo-MFS1-error.png" style="margin: auto; display: flex;">
+
+<p>此时元件1和元件0被划分到节点0和节点4，而节点0和4之间存在直接连接的关系，我们称元件0和元件1是满足拓扑约束的。<br>
+相反，元件2和元件3被划分到节点0和节点5，而节点0和5之间不存在直接连接的关系，我们称元件2和元件3是不满足拓扑约束的。</p><h3 id="baseline"><a href="https://customized-computing.github.io/VLSI-FPGA/#/advanced/partition_problem_advanced?id=baseline" data-id="baseline" class="anchor"><span>baseline</span></a></h3><p>最优解取自论文<a href="https://ieeexplore.ieee.org/document/9643481" target="_blank" rel="noopener">《TopoPart: a Multi-level Topology-Driven Partitioning Framework for Multi-FPGA Systems》</a>。</p><blockquote>
+<p>离baseline越近，对于你的大作业成绩是有好处的。</p></blockquote>
+<p>MFS1的最优解，使用Titan23数据集。</p><table>
+<thead>
+<tr>
+<th>基准测试数据</th>
+<th>节点数量(node)</th>
+<th>线网数量(net)</th>
+<th>割代价</th>
+<th>用时(s)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>spareT1_core</td>
+<td>91976</td>
+<td>411095</td>
+<td>54841</td>
+<td>86.342</td>
+</tr>
+<tr>
+<td>neuron</td>
+<td>92290</td>
+<td>327876</td>
+<td>8815</td>
+<td>23.692</td>
+</tr>
+<tr>
+<td>stereo_vision</td>
+<td>94059</td>
+<td>287174</td>
+<td>32068</td>
+<td>55.616</td>
+</tr>
+<tr>
+<td>des90</td>
+<td>111221</td>
+<td>631452</td>
+<td>87211</td>
+<td>126.112</td>
+</tr>
+<tr>
+<td>SLAM_spheric</td>
+<td>113115</td>
+<td>495472</td>
+<td>54402</td>
+<td>90.432</td>
+</tr>
+<tr>
+<td>cholesky_mc</td>
+<td>113250</td>
+<td>477730</td>
+<td>37658</td>
+<td>51.957</td>
+</tr>
+<tr>
+<td>segmentation</td>
+<td>138295</td>
+<td>622376</td>
+<td>34092</td>
+<td>48.945</td>
+</tr>
+<tr>
+<td>bitonic_mesh</td>
+<td>192064</td>
+<td>1129440</td>
+<td>184894</td>
+<td>149.847</td>
+</tr>
+<tr>
+<td>dart</td>
+<td>202354</td>
+<td>909795</td>
+<td>168197</td>
+<td>251.163</td>
+</tr>
+<tr>
+<td>openCV</td>
+<td>217443</td>
+<td>989365</td>
+<td>120428</td>
+<td>117.595</td>
+</tr>
+<tr>
+<td>stap_qrd</td>
+<td>240240</td>
+<td>970335</td>
+<td>134256</td>
+<td>296.304</td>
+</tr>
+<tr>
+<td>minres</td>
+<td>261359</td>
+<td>988482</td>
+<td>96178</td>
+<td>145.168</td>
+</tr>
+<tr>
+<td>cholesky_bdti</td>
+<td>266422</td>
+<td>1067463</td>
+<td>75479</td>
+<td>110.059</td>
+</tr>
+<tr>
+<td>denoise</td>
+<td>275638</td>
+<td>1253869</td>
+<td>93464</td>
+<td>115.618</td>
+</tr>
+<tr>
+<td>sparcT2_core</td>
+<td>300109</td>
+<td>1313186</td>
+<td>98128</td>
+<td>185.788</td>
+</tr>
+<tr>
+<td>gsm_switch</td>
+<td>493260</td>
+<td>2204961</td>
+<td>267424</td>
+<td>471.599</td>
+</tr>
+<tr>
+<td>mes_noc</td>
+<td>547544</td>
+<td>2609889</td>
+<td>297140</td>
+<td>372.403</td>
+</tr>
+<tr>
+<td>LU_Network</td>
+<td>574369</td>
+<td>2327102</td>
+<td>52508</td>
+<td>407.184</td>
+</tr>
+<tr>
+<td>LU230</td>
+<td>635456</td>
+<td>2604888</td>
+<td>134877</td>
+<td>261.887</td>
+</tr>
+<tr>
+<td>sparcT1_chip2</td>
+<td>820886</td>
+<td>3210647</td>
+<td>207814</td>
+<td>517.124</td>
+</tr>
+<tr>
+<td>directrf</td>
+<td>931275</td>
+<td>3437764</td>
+<td>113493</td>
+<td>248.817</td>
+</tr>
+<tr>
+<td>bitcoin_miner</td>
+<td>1089284</td>
+<td>3109046</td>
+<td>413566</td>
+<td>1231.155</td>
+</tr>
+</tbody></table>
+<p>MFS2的最优解，使用Generated数据集。</p><table>
+<thead>
+<tr>
+<th>基准测试数据</th>
+<th>节点数量(node)</th>
+<th>线网数量(net)</th>
+<th>割代价</th>
+<th>用时(s)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>case1</td>
+<td>300000</td>
+<td>749091</td>
+<td>149065</td>
+<td>209.55</td>
+</tr>
+<tr>
+<td>case2</td>
+<td>400000</td>
+<td>998902</td>
+<td>162611</td>
+<td>254.55</td>
+</tr>
+<tr>
+<td>case3</td>
+<td>500000</td>
+<td>1247856</td>
+<td>139118</td>
+<td>300.45</td>
+</tr>
+<tr>
+<td>case4</td>
+<td>600000</td>
+<td>1498396</td>
+<td>350546</td>
+<td>419.71</td>
+</tr>
+<tr>
+<td>case5</td>
+<td>700000</td>
+<td>1748250</td>
+<td>177704</td>
+<td>375.81</td>
+</tr>
+<tr>
+<td>case6</td>
+<td>800000</td>
+<td>1998061</td>
+<td>149259</td>
+<td>402.34</td>
+</tr>
+<tr>
+<td>case7</td>
+<td>900000</td>
+<td>2247701</td>
+<td>304398</td>
+<td>551.28</td>
+</tr>
+<tr>
+<td>case8</td>
+<td>1000000</td>
+<td>2497555</td>
+<td>270777</td>
+<td>550.91</td>
+</tr>
+</tbody></table>
+</article></section></main>
+  <script>
+    window.$docsify = {
+      name: 'VLSI课程实验文档',
+      repo: 'https://github.com/Customized-Computing/VLSI-FPGA',
+      loadSidebar: true,
+      alias: {
+        '/.*/_sidebar.md': '/_sidebar.md',
+      },
+      subMaxLevel: 3,
+      auto2top: true,
+    }
+  </script>
+  <!-- Docsify v4 -->
+  <script src="./划分_files/docsify@4"></script>
+  <script src="./划分_files/search.min.js.下载"></script>
+  <script src="./划分_files/docsify-copy-code"></script>
+  <script src="./划分_files/katex.min.js.下载"></script>
+  <link rel="stylesheet" href="./划分_files/katex.min.css">
+  <script src="./划分_files/marked@4"></script>
+  <script src="./划分_files/docsify-katex.js.下载"></script>
+  <!--参考网址 https://juejin.cn/post/6897123103583764488 -->
+
+
+<div class="progress" style="opacity: 0; width: 0%;"></div></body></html>
