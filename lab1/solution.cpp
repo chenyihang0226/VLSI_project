@@ -56,6 +56,64 @@ struct Hypergraph {
     vector<int> node_weight;
 };
 
+// 拓扑图结构：用于拓扑约束（Topology Constraints）
+struct TopoGraph {
+    int n = 0;                       // FPGA 节点数
+    vector<bool> adj_matrix;         // 邻接矩阵 (n*n)，O(1) 查询连通性
+};
+
+// 读取拓扑图文件（格式：第一行 "节点数 边数"，后续每行 "u v"）
+TopoGraph read_topo_graph(const string &filename) {
+    ifstream file(filename);
+    TopoGraph g;
+    int m;
+    if (!(file >> g.n >> m)) {
+        cerr << "Failed to read topology file: " << filename << endl;
+        exit(-1);
+    }
+    g.adj_matrix.assign(g.n * g.n, false);
+    for (int i = 0; i < g.n; ++i)
+        g.adj_matrix[i * g.n + i] = true;  // 自环
+    for (int i = 0; i < m; ++i) {
+        int u, v;
+        if (!(file >> u >> v)) break;
+        g.adj_matrix[u * g.n + v] = true;
+        g.adj_matrix[v * g.n + u] = true;
+    }
+    return g;
+}
+
+// 拓扑约束检查（FM 中使用）：移动 u 到 to_part 是否合法
+bool topo_check_move(const TopoGraph &topo, const Hypergraph &hg,
+                     int u, int to_part, const vector<int> &part) {
+    for (int net_idx : hg.node_nets[u]) {
+        for (int v : hg.nets[net_idx]) {
+            if (v == u) continue;
+            int v_part = part[v];
+            if (v_part != to_part) {
+                if (!topo.adj_matrix[to_part * topo.n + v_part])
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
+// 拓扑约束检查（初始化中使用）：只检查已放置的邻居
+bool topo_check_init(const TopoGraph &topo, const Hypergraph &hg,
+                     int u, int to_part, const vector<int> &part) {
+    for (int net_idx : hg.node_nets[u]) {
+        for (int v : hg.nets[net_idx]) {
+            if (v == u || part[v] == -1) continue;
+            if (part[v] != to_part) {
+                if (!topo.adj_matrix[to_part * topo.n + part[v]])
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
 struct CoarsenResult {
     Hypergraph coarse;
     vector<int> fine_to_coarse;
@@ -63,13 +121,15 @@ struct CoarsenResult {
 
 struct MoveRecord {
     int node = -1;
-    char from_side = 0;
+    int from_part = 0;   // 移动前的 partition (0..k-1)
+    int to_part = 0;     // 移动目标 partition (0..k-1, != from_part)
     int gain = 0;
 };
 
 struct GainEntry {
     int gain = 0;
     int node = -1;
+    int to_part = 0;     // 移动目标 partition
     int version = 0;
 };
 
@@ -79,17 +139,18 @@ struct GainEntryCmp {
     }
 };
 
-void compute_balance_bounds(int total_weight, int &min_x, int &max_x) {
-    int min_val = static_cast<int>(ceil((0.5 - kBalanceRatio) * total_weight)); // Leslie：乘以权重是因为一开始原始图设定每一个节点的权重为 1， total_weight 为节点数量而粗化图的时候也是相加，所以还是相等的
-    int max_val = static_cast<int>(floor((0.5 + kBalanceRatio) * total_weight));
-    if (min_val < 0) {
-        min_val = 0;
-    }
-    if (max_val > total_weight) {
-        max_val = total_weight;
-    }
-    min_x = min_val;
-    max_x = max_val;
+void compute_balance_bounds_kway(int total_weight, int k,
+                                  vector<int> &min_w, vector<int> &max_w) {
+    // k 路平衡约束：
+    //   每路的目标权重 ≈ total_weight / k
+    //   允许偏差 kBalanceRatio × total_weight
+    //   当 kBalanceRatio × k = 1 时严格均分（偏差为 0）
+    double per_part = static_cast<double>(total_weight) / static_cast<double>(k);
+    double margin = kBalanceRatio * static_cast<double>(total_weight);
+    int min_val = max(0, static_cast<int>(ceil(per_part - margin)));
+    int max_val = min(total_weight, static_cast<int>(floor(per_part + margin)));
+    min_w.assign(k, min_val);
+    max_w.assign(k, max_val);
 }
 
 void rebuild_node_nets(Hypergraph &hg) {
@@ -252,10 +313,13 @@ CoarsenResult coarsen_once(const Hypergraph &fine, mt19937 &rng) {
     return result;
 }
 
-// 接下来是三种划分方式
-// 1.节点度排序后划分
-vector<char> init_degree_balanced_part(const Hypergraph &hg, mt19937 &rng) {
-    vector<char> part(hg.n, 1);
+// ========== k-way initial partition methods ==========
+
+// 1. Degree-balanced: sort by degree (descending), assign to lightest partition
+vector<int> init_degree_balanced_kway(const Hypergraph &hg, int k, mt19937 &rng,
+                                       const TopoGraph *topo,
+                                       const vector<int> *fixed_of) {
+    vector<int> part(hg.n, -1);
     vector<int> order(hg.n);
     iota(order.begin(), order.end(), 0);
     shuffle(order.begin(), order.end(), rng);
@@ -264,529 +328,448 @@ vector<char> init_degree_balanced_part(const Hypergraph &hg, mt19937 &rng) {
     });
 
     int total_weight = accumulate(hg.node_weight.begin(), hg.node_weight.end(), 0);
-    int min_x = 0;
-    int max_x = 0;
-    compute_balance_bounds(total_weight, min_x, max_x);
+    vector<int> min_w(k), max_w(k);
+    compute_balance_bounds_kway(total_weight, k, min_w, max_w);
 
-    int wx = 0;
-    int wy = 0;
+    vector<int> weight(k, 0);
 
-    for (int u : order) {
-        int w = hg.node_weight[u];
-        bool put_x = false;
-
-        if (wx + w <= min_x) {
-            put_x = true;
-        } else if (wy + w <= min_x) {
-            put_x = false;
-        } else if (wx + w > max_x) {
-            put_x = false;
-        } else if (wy + w > max_x) {
-            put_x = true;
-        } else {
-            put_x = (wx <= wy);
-        }
-
-        if (put_x) {
-            part[u] = 0;
-            wx += w;
-        } else {
-            part[u] = 1;
-            wy += w;
+    // Pre-assign fixed nodes
+    if (fixed_of) {
+        for (int u = 0; u < hg.n; ++u) {
+            int p = (*fixed_of)[u];
+            if (p != -1) {
+                part[u] = p;
+                weight[p] += hg.node_weight[u];
+            }
         }
     }
 
+    for (int u : order) {
+        if (part[u] != -1) continue;  // skip fixed nodes
+        int w = hg.node_weight[u];
+        int best_p = -1;
+        int lightest = numeric_limits<int>::max();
+        for (int p = 0; p < k; ++p) {
+            if (weight[p] + w > max_w[p]) continue;
+            if (topo && !topo_check_init(*topo, hg, u, p, part)) continue;
+            if (weight[p] < lightest) { lightest = weight[p]; best_p = p; }
+        }
+        if (best_p == -1) best_p = 0;
+        part[u] = best_p;
+        weight[best_p] += w;
+    }
     return part;
 }
 
-// 2.随机划分
-vector<char> init_random_balanced_part(const Hypergraph &hg, mt19937 &rng) {
-    vector<char> part(hg.n, 1);
+// 2. Random-balanced: random order, assign to lightest feasible partition
+vector<int> init_random_balanced_kway(const Hypergraph &hg, int k, mt19937 &rng,
+                                       const TopoGraph *topo,
+                                       const vector<int> *fixed_of) {
+    vector<int> part(hg.n, -1);
     vector<int> order(hg.n);
     iota(order.begin(), order.end(), 0);
     shuffle(order.begin(), order.end(), rng);
 
     int total_weight = accumulate(hg.node_weight.begin(), hg.node_weight.end(), 0);
-    int min_x = 0;
-    int max_x = 0;
-    compute_balance_bounds(total_weight, min_x, max_x);
+    vector<int> min_w(k), max_w(k);
+    compute_balance_bounds_kway(total_weight, k, min_w, max_w);
 
-    int wx = 0;
-    int wy = 0;
+    vector<int> weight(k, 0);
 
-    for (int u : order) {
-        int w = hg.node_weight[u];
-        bool can_x = (wx + w <= max_x);
-        bool can_y = (wy + w <= max_x);
-        bool put_x = false;
-
-        if (wx < min_x && can_x) {
-            put_x = true;
-        } else if (wy < min_x && can_y) {
-            put_x = false;
-        } else if (can_x && can_y) {
-            if (wx == wy) {
-                put_x = ((rng() & 1U) == 0U);
-            } else {
-                put_x = (wx < wy);
-            }
-        } else if (can_x) {
-            put_x = true;
-        } else {
-            put_x = false;
-        }
-
-        if (put_x) {
-            part[u] = 0;
-            wx += w;
-        } else {
-            part[u] = 1;
-            wy += w;
+    if (fixed_of) {
+        for (int u = 0; u < hg.n; ++u) {
+            int p = (*fixed_of)[u];
+            if (p != -1) { part[u] = p; weight[p] += hg.node_weight[u]; }
         }
     }
 
+    for (int u : order) {
+        if (part[u] != -1) continue;
+        int w = hg.node_weight[u];
+        int best_p = -1;
+        int lightest = numeric_limits<int>::max();
+        for (int p = 0; p < k; ++p) {
+            if (weight[p] + w > max_w[p]) continue;
+            if (topo && !topo_check_init(*topo, hg, u, p, part)) continue;
+            if (weight[p] < lightest) { lightest = weight[p]; best_p = p; }
+        }
+        if (best_p == -1) best_p = 0;
+        part[u] = best_p;
+        weight[best_p] += w;
+    }
     return part;
 }
 
-// 3.小线网保护的平衡划分
-vector<char> init_smallnet_balanced_part(const Hypergraph &hg, mt19937 &rng) {
-    vector<char> part(hg.n, 1);
+// 3. Small-net-weighted: nodes in small nets get higher score, then assign
+vector<int> init_smallnet_balanced_kway(const Hypergraph &hg, int k, mt19937 &rng,
+                                         const TopoGraph *topo,
+                                         const vector<int> *fixed_of) {
     vector<double> score(hg.n, 0.0);
-
     for (const auto &net : hg.nets) {
         int net_size = static_cast<int>(net.size());
-        if (net_size <= 1) {
-            continue;
-        }
+        if (net_size <= 1) continue;
         double w = 1.0 / static_cast<double>(net_size - 1);
-        if (net_size <= 4) {
-            w *= kSmallNetBoost;
-        }
-        for (int u : net) {
-            score[u] += w;
-        }
+        if (net_size <= 4) w *= kSmallNetBoost;
+        for (int u : net) score[u] += w;
     }
 
     vector<int> order(hg.n);
     iota(order.begin(), order.end(), 0);
     shuffle(order.begin(), order.end(), rng);
     stable_sort(order.begin(), order.end(), [&score](int a, int b) {
-        if (fabs(score[a] - score[b]) > 1e-12) {
-            return score[a] > score[b];
-        }
+        if (fabs(score[a] - score[b]) > 1e-12) return score[a] > score[b];
         return a < b;
     });
 
+    vector<int> part(hg.n, -1);
     int total_weight = accumulate(hg.node_weight.begin(), hg.node_weight.end(), 0);
-    int min_x = 0;
-    int max_x = 0;
-    compute_balance_bounds(total_weight, min_x, max_x);
+    vector<int> min_w(k), max_w(k);
+    compute_balance_bounds_kway(total_weight, k, min_w, max_w);
 
-    int wx = 0;
-    int wy = 0;
-    double sx = 0.0;
-    double sy = 0.0;
+    vector<int> weight(k, 0);
+    vector<double> score_sum(k, 0.0);
 
-    for (int u : order) {
-        int w = hg.node_weight[u];
-        bool can_x = (wx + w <= max_x);
-        bool can_y = (wy + w <= max_x);
-        bool put_x = false;
-
-        if (wx < min_x && can_x) {
-            put_x = true;
-        } else if (wy < min_x && can_y) {
-            put_x = false;
-        } else if (can_x && can_y) {
-            put_x = (sx <= sy);
-        } else {
-            put_x = can_x;
-        }
-
-        if (put_x) {
-            part[u] = 0;
-            wx += w;
-            sx += score[u];
-        } else {
-            part[u] = 1;
-            wy += w;
-            sy += score[u];
+    if (fixed_of) {
+        for (int u = 0; u < hg.n; ++u) {
+            int p = (*fixed_of)[u];
+            if (p != -1) { part[u] = p; weight[p] += hg.node_weight[u]; }
         }
     }
 
+    for (int u : order) {
+        if (part[u] != -1) continue;
+        int w = hg.node_weight[u];
+        int best_p = -1;
+        int lightest = numeric_limits<int>::max();
+        for (int p = 0; p < k; ++p) {
+            if (weight[p] + w > max_w[p]) continue;
+            if (topo && !topo_check_init(*topo, hg, u, p, part)) continue;
+            if (weight[p] < lightest) { lightest = weight[p]; best_p = p; }
+        }
+        if (best_p == -1) {
+            double min_score = numeric_limits<double>::max();
+            for (int p = 0; p < k; ++p) {
+                if (weight[p] + w <= max_w[p] && score_sum[p] < min_score) {
+                    min_score = score_sum[p]; best_p = p;
+                }
+            }
+            if (best_p == -1) best_p = 0;
+        }
+        part[u] = best_p;
+        weight[best_p] += w;
+        score_sum[best_p] += score[u];
+    }
     return part;
 }
 
-void build_net_side_counts(const Hypergraph &hg,
-                           const vector<char> &part,
-                           vector<int> &count_x,
-                           vector<int> &count_y) {
-    count_x.assign(hg.nets.size(), 0);
-    count_y.assign(hg.nets.size(), 0);
-
+void build_net_side_counts_kway(const Hypergraph &hg,
+                                 const vector<int> &part,
+                                 int k,
+                                 vector<int> &count) {
+    // Flat array: count[net_idx * k + p] = pins in partition p.
+    // Single contiguous allocation (cache-friendly, avoids 749k heap allocs).
+    count.assign(hg.nets.size() * k, 0);
     for (int net_idx = 0; net_idx < static_cast<int>(hg.nets.size()); ++net_idx) {
+        int base = net_idx * k;
         for (int u : hg.nets[net_idx]) {
-            if (part[u] == 0) {
-                count_x[net_idx]++;
-            } else {
-                count_y[net_idx]++;
-            }
+            count[base + part[u]]++;
         }
     }
 }
 
-int cut_from_counts(const vector<int> &count_x, const vector<int> &count_y) {
+int cut_from_counts_kway(const vector<int> &count, int num_nets, int k) {
     int cut = 0;
-    for (size_t i = 0; i < count_x.size(); ++i) {
-        if (count_x[i] > 0 && count_y[i] > 0) {
-            cut++;
+    for (int i = 0; i < num_nets; ++i) {
+        int base = i * k;
+        int parts = 0;
+        for (int p = 0; p < k; ++p) {
+            if (count[base + p] > 0) parts++;
+            if (parts >= 2) { cut++; break; }
         }
     }
     return cut;
 }
 
-int delta_cut_for_move(const Hypergraph &hg,
-                       int u,
-                       const vector<char> &part,
-                       const vector<int> &count_x,
-                       const vector<int> &count_y) {
+int delta_cut_for_move_kway(const Hypergraph &hg,
+                            int u, int to_part,
+                            const vector<int> &part,
+                            const vector<int> &count,
+                            int k) {
     int delta = 0;
-    bool from_x = (part[u] == 0);
+    int from_part = part[u];
 
     for (int net_idx : hg.node_nets[u]) {
-        int cx = count_x[net_idx];
-        int cy = count_y[net_idx];
-        bool before_cut = (cx > 0 && cy > 0);
+        int base = net_idx * k;
+        int before_parts = 0;
+        for (int p = 0; p < k; ++p)
+            if (count[base + p] > 0) before_parts++;
+        bool before_cut = (before_parts >= 2);
 
-        if (from_x) {
-            cx--;
-            cy++;
-        } else {
-            cy--;
-            cx++;
-        }
+        int after_parts = before_parts;
+        if (count[base + from_part] == 1) after_parts--;
+        if (count[base + to_part] == 0) after_parts++;
+        bool after_cut = (after_parts >= 2);
 
-        bool after_cut = (cx > 0 && cy > 0);
         delta += (after_cut ? 1 : 0) - (before_cut ? 1 : 0);
     }
-
     return delta;
 }
 
-void apply_move(const Hypergraph &hg,
-                int u,
-                vector<char> &part,
-                vector<int> &count_x,
-                vector<int> &count_y,
-                int &wx,
-                int &wy) {
-    bool from_x = (part[u] == 0);
+void apply_move_kway(const Hypergraph &hg,
+                     int u, int to_part,
+                     vector<int> &part,
+                     vector<int> &count,
+                     vector<int> &weight,
+                     int k) {
+    int from_part = part[u];
     int w = hg.node_weight[u];
 
     for (int net_idx : hg.node_nets[u]) {
-        if (from_x) {
-            count_x[net_idx]--;
-            count_y[net_idx]++;
-        } else {
-            count_y[net_idx]--;
-            count_x[net_idx]++;
-        }
+        int base = net_idx * k;
+        count[base + from_part]--;
+        count[base + to_part]++;
     }
 
-    if (from_x) {
-        part[u] = 1;
-        wx -= w;
-        wy += w;
-    } else {
-        part[u] = 0;
-        wy -= w;
-        wx += w;
-    }
+    part[u] = to_part;
+    weight[from_part] -= w;
+    weight[to_part] += w;
 }
 
-void rollback_move(const Hypergraph &hg,
-                   int u,
-                   char from_side,
-                   vector<char> &part,
-                   vector<int> &count_x,
-                   vector<int> &count_y,
-                   int &wx,
-                   int &wy) {
-    if (part[u] != from_side) {
-        apply_move(hg, u, part, count_x, count_y, wx, wy);
-    }
-}
-
-// FM原理：
-// 重复若干 pass：
-//     计算当前每条 net 的 X/Y 计数
-//     计算每个节点移动到对侧的 gain
-//     把所有节点放进最大堆
-
-//     本 pass 内重复若干 step：
-//         从堆中找 gain 最大且满足平衡约束的节点
-//         移动该节点，并锁定
-//         只更新受影响邻居的 gain
-//         记录累计 gain 和最佳前缀
-
-//     pass 结束：
-//         如果没有正收益，全部回滚并停止
-//         否则只保留最佳收益前缀，回滚后缀
-void fm_refine_sampled(const Hypergraph &hg,
-                       vector<char> &part,
-                       mt19937 &rng,
-                       int pass_limit,
-                       int step_limit,
-                       int candidate_size,
-                       const chrono::steady_clock::time_point &deadline) {
+// ========== k-way FM refinement ==========
+//
+// FM principle (k-way extension):
+//   For each pass:
+//     1) Build net-side count matrix count[net][p] for all k partitions
+//     2) Compute initial weight vector w[p]
+//     3) For each node u, compute the best gain achievable by moving u
+//        to some other partition (max over k-1 targets).  Push best to heap.
+//     4) Repeat up to step_limit steps:
+//        - Pop best gain from heap; check balance constraints
+//        - Apply move; lock the node
+//        - Update gains for affected neighbors
+//        - Track cumulative gain, best prefix
+//     5) Roll back to best prefix; if no improvement, revert all
+void fm_refine_kway(const Hypergraph &hg,
+                    vector<int> &part,
+                    int k,
+                    mt19937 &rng,
+                    int pass_limit,
+                    int step_limit,
+                    int candidate_size,
+                    const chrono::steady_clock::time_point &deadline,
+                    const TopoGraph *topo = nullptr,
+                    const vector<int> *fixed_of = nullptr) {
     (void)rng;
-    if (hg.n == 0) {
-        return;
-    }
+    if (hg.n == 0) return;
 
     int total_weight = accumulate(hg.node_weight.begin(), hg.node_weight.end(), 0);
-    int min_x = 0;
-    int max_x = 0;
-    compute_balance_bounds(total_weight, min_x, max_x);
+    vector<int> min_w(k), max_w(k);
+    compute_balance_bounds_kway(total_weight, k, min_w, max_w);
 
-    // 确定每轮步数与堆检查上限
     int steps = min(step_limit, hg.n);
     int max_heap_checks = max(64, candidate_size);
     vector<int> dedup_mark(hg.n, -1);
     int dedup_stamp = 0;
 
     for (int pass = 0; pass < pass_limit; ++pass) {
-        if (chrono::steady_clock::now() >= deadline) {
-            return;
-        }
+        if (chrono::steady_clock::now() >= deadline) return;
 
-        vector<int> count_x;
-        vector<int> count_y;
-        build_net_side_counts(hg, part, count_x, count_y); // 计算出每个线网在左边和右边分别有多少节点
+        // --- Build flat net-side count array ---
+        vector<int> count;
+        build_net_side_counts_kway(hg, part, k, count);
 
-        // 计算出总权重 wx 和 wy
-        int wx = 0;
+        // --- Compute per-partition weight ---
+        vector<int> weight(k, 0);
         for (int u = 0; u < hg.n; ++u) {
-            if (part[u] == 0) {
-                wx += hg.node_weight[u];
-            }
+            weight[part[u]] += hg.node_weight[u];
         }
-        int wy = total_weight - wx;
 
         vector<char> locked(hg.n, 0);
-        vector<MoveRecord> moves; //移动记录，后续方便回溯找到能收获最大gain的移动过程
+        // 固定节点锁定（初始化后再锁定，因为固定节点在 init 中已预置）
+        if (fixed_of) {
+            for (int u = 0; u < hg.n; ++u)
+                if ((*fixed_of)[u] != -1) locked[u] = 1;
+        }
+        vector<MoveRecord> moves;
         moves.reserve(steps);
 
+        // gain[u] = best gain achievable by moving u to some other partition
+        // gain_target[u] = which partition gives that best gain
         vector<int> gain(hg.n, numeric_limits<int>::min());
+        vector<int> gain_target(hg.n, -1);
         vector<int> gain_version(hg.n, 0);
-        
-        //记录gain的最大堆
-        //GainEntry是堆里的元素，成员包括gain、node索引以及版本version（为了解决maxheap不能直接更新）
-        priority_queue<GainEntry, vector<GainEntry>, GainEntryCmp> max_heap; 
 
+        priority_queue<GainEntry, vector<GainEntry>, GainEntryCmp> max_heap;
+
+        // --- Initial gain computation ---
+        // For each node, evaluate moving to all k-1 other partitions.
+        // Only the best target is pushed onto the heap.
         for (int u = 0; u < hg.n; ++u) {
-            gain[u] = -delta_cut_for_move(hg, u, part, count_x, count_y); // 如果移动到对面，能减少多少割线
-            max_heap.push({gain[u], u, gain_version[u]});
+            int best_g = numeric_limits<int>::min();
+            int best_t = -1;
+            for (int p = 0; p < k; ++p) {
+                if (p == part[u]) continue;
+                int g = -delta_cut_for_move_kway(hg, u, p, part, count, k);
+                if (g > best_g) { best_g = g; best_t = p; }
+            }
+            gain[u] = best_g;
+            gain_target[u] = best_t;
+            max_heap.push({best_g, u, best_t, gain_version[u]});
         }
 
-        int cumulative_gain = 0; //当前已经执行的移动序列的累计收益
-        int best_prefix_gain = 0; //到目前为止，累计收益最大的前缀收益
-        int best_prefix_len = 0; //最佳前缀包含多少步移动
-        // 例如移动gain是{3，-2，4，-10}
-        // 累计收益为{3.1，5，-5}
-        // 则best_prefix_gain=5，best_prefix_len=3，最后保留前三步回滚第四步
+        int cumulative_gain = 0;
+        int best_prefix_gain = 0;
+        int best_prefix_len = 0;
 
-        // 进行 steps 次节点移动
+        // --- Main FM loop ---
         for (int step = 0; step < steps; ++step) {
-            if (chrono::steady_clock::now() >= deadline) {
-                return;
-            }
+            if (chrono::steady_clock::now() >= deadline) return;
 
             int best_gain = numeric_limits<int>::min();
             int best_u = -1;
-            char best_from_side = 0;
+            int best_target = -1;
 
             vector<GainEntry> deferred;
             deferred.reserve(32);
             int heap_checks = 0;
-            // 找到合适的 best_u
+
             while (!max_heap.empty() && heap_checks < max_heap_checks) {
                 GainEntry entry = max_heap.top();
                 max_heap.pop();
                 heap_checks++;
 
                 int u = entry.node;
-                if (locked[u]) { // 是否已经锁定
-                    continue;
-                }
-                if (entry.version != gain_version[u]) { // 数据版本是否过期
-                    continue;
-                }
+                if (locked[u]) continue;
+                if (entry.version != gain_version[u]) continue;
 
-                bool from_x = (part[u] == 0);
+                int to_part = entry.to_part;
                 int w = hg.node_weight[u];
-                int new_wx = wx + (from_x ? -w : w);
-                if (new_wx < min_x || new_wx > max_x) { // 移动后也要满足条件 min_x, max_x
-                    deferred.push_back(entry); // 不满足也暂存到 数组 deferred 
+
+                // Check balance constraint
+                if (weight[to_part] + w > max_w[to_part]) {
+                    deferred.push_back(entry);
                     continue;
                 }
 
-                // 由于堆顶是gain最大的，找到第一个合法候选就可以作为本步最优选择
+                // Check topology constraint
+                if (topo && !topo_check_move(*topo, hg, u, to_part, part)) {
+                    deferred.push_back(entry);
+                    continue;
+                }
+
+                // Found a valid move
                 best_u = u;
                 best_gain = entry.gain;
-                best_from_side = part[u];
+                best_target = to_part;
                 break;
             }
 
-            for (const auto &entry : deferred) {
-                max_heap.push(entry);
-            }
+            for (const auto &e : deferred) max_heap.push(e);
 
             if (best_u == -1) {
-                // 执行全量扫描，以避免因堆 内存检查 上限而漏掉可行的移动步骤（前面对堆的检查是有 max_heap_checks 限制的）
+                // Fallback: full scan
                 for (int u = 0; u < hg.n; ++u) {
-                    if (locked[u]) {
-                        continue;
-                    }
-
-                    bool from_x = (part[u] == 0);
+                    if (locked[u]) continue;
+                    int to_part = gain_target[u];
+                    if (to_part == -1) continue;
                     int w = hg.node_weight[u];
-                    int new_wx = wx + (from_x ? -w : w);
-                    if (new_wx < min_x || new_wx > max_x) {
-                        continue;
-                    }
-
+                    if (weight[to_part] + w > max_w[to_part]) continue;
+                    if (topo && !topo_check_move(*topo, hg, u, to_part, part)) continue;
                     if (gain[u] > best_gain) {
                         best_gain = gain[u];
                         best_u = u;
-                        best_from_side = part[u];
+                        best_target = to_part;
                     }
                 }
             }
 
-            // 没有任何合法移动就结束本轮pass
-            if (best_u == -1) {
-                break;
-            }
+            if (best_u == -1) break;  // no valid move
 
-            locked[best_u] = 1; // 找到合法最优后，锁定
-            moves.push_back({best_u, best_from_side, best_gain}); // 记录移动清单
-            apply_move(hg, best_u, part, count_x, count_y, wx, wy); // 修改它的阵营，更新体积和线网计数
+            locked[best_u] = 1;
+            int from_part = part[best_u];
+            moves.push_back({best_u, from_part, best_target, best_gain});
 
-            dedup_stamp++; // 时间戳
-            vector<int> affected; // 受影响的邻居
+            apply_move_kway(hg, best_u, best_target, part, count, weight, k);
+
+            // --- Update affected neighbors ---
+            dedup_stamp++;
+            vector<int> affected;
             for (int net_idx : hg.node_nets[best_u]) {
                 for (int v : hg.nets[net_idx]) {
-                    if (locked[v]) {
-                        continue;
-                    }
-                    if (dedup_mark[v] == dedup_stamp) {
-                        continue;
-                    }
+                    if (locked[v]) continue;
+                    if (dedup_mark[v] == dedup_stamp) continue;
                     dedup_mark[v] = dedup_stamp;
                     affected.push_back(v);
                 }
             }
 
-            // 受影响的邻居，更新 gain ，版本号 + 1，这样比重新计算所有节点的gain快很多
             for (int v : affected) {
-                gain[v] = -delta_cut_for_move(hg, v, part, count_x, count_y);
+                int best_g = numeric_limits<int>::min();
+                int best_t = -1;
+                for (int p = 0; p < k; ++p) {
+                    if (p == part[v]) continue;
+                    int g = -delta_cut_for_move_kway(hg, v, p, part, count, k);
+                    if (g > best_g) { best_g = g; best_t = p; }
+                }
+                gain[v] = best_g;
+                gain_target[v] = best_t;
                 gain_version[v]++;
-                max_heap.push({gain[v], v, gain_version[v]});
+                max_heap.push({best_g, v, best_t, gain_version[v]});
             }
 
-            cumulative_gain += best_gain; // 累计收益
+            cumulative_gain += best_gain;
             if (cumulative_gain > best_prefix_gain) {
                 best_prefix_gain = cumulative_gain;
                 best_prefix_len = static_cast<int>(moves.size());
             }
         }
 
-        if (moves.empty()) {
-            break;
-        }
+        if (moves.empty()) break;
 
-        // 没有收益，回退
+        // No improvement → roll back all moves
         if (best_prefix_gain <= 0) {
             for (int i = static_cast<int>(moves.size()) - 1; i >= 0; --i) {
-                rollback_move(hg,
-                              moves[i].node,
-                              moves[i].from_side,
-                              part,
-                              count_x,
-                              count_y,
-                              wx,
-                              wy);
+                auto &m = moves[i];
+                // Reverse: move node back from to_part to from_part
+                apply_move_kway(hg, m.node, m.from_part, part, count, weight, k);
             }
             break;
         }
 
-        // 中途有一刻收益达到了巅峰，就回退到那个点
+        // Roll back suffix after best prefix
         for (int i = static_cast<int>(moves.size()) - 1; i >= best_prefix_len; --i) {
-            rollback_move(hg,
-                          moves[i].node,
-                          moves[i].from_side,
-                          part,
-                          count_x,
-                          count_y,
-                          wx,
-                          wy);
+            auto &m = moves[i];
+            apply_move_kway(hg, m.node, m.from_part, part, count, weight, k);
         }
     }
 }
 
-int evaluate_cut(const Hypergraph &hg, const vector<char> &part) {
-    vector<int> count_x;
-    vector<int> count_y;
-    build_net_side_counts(hg, part, count_x, count_y);
-    return cut_from_counts(count_x, count_y);
+int evaluate_cut_kway(const Hypergraph &hg, const vector<int> &part, int k) {
+    vector<int> count;
+    build_net_side_counts_kway(hg, part, k, count);
+    return cut_from_counts_kway(count, static_cast<int>(hg.nets.size()), k);
 }
 
 // ============================================================================
 // Multi-thread result type
 // ============================================================================
 
-// RestartResult -- return value of a single restart.
-// In the serial version, each restart's best partition was written directly
-// into the outer loop's best_part/best_cut. In the multi-threaded version,
-// each worker runs independently and cannot write to shared global variables.
-// So we encapsulate one restart's output into this struct and return it to
-// the caller (who merges results after the parallel region).
-// Thread safety: each worker constructs its own RestartResult; no other
-// thread accesses it concurrently, so no internal locking is needed.
 struct RestartResult {
-    vector<char> part;   // best partition of this restart (internal index)
+    vector<int> part;    // best partition (0..k-1) of this restart
     int cut = numeric_limits<int>::max();
 };
 
-// run_one_restart -- execute one complete random restart.
-// Semantically equivalent to the body of the original serial loop:
-//   for (int r = 0; r < kRestarts; ++r) { ... }
-// Extracting it as a standalone function is the key refactoring step
-// that enables multi-threading.
-//
-// Thread-safety design:
-//   restart_id  -- by value, each thread has its own copy
-//   fine        -- const ref, shared read-only; built once before any
-//                  worker starts, never modified thereafter
-//   deadline    -- by value (time_point is trivially copyable), each
-//                  thread gets the same absolute time point
-//   rng         -- thread-local mt19937, seed bound to restart_id
-//   levels      -- thread-local vector, independent coarse hierarchy
-//   part        -- thread-local partition vector
-//
-// Random seed: 42 + restart_id * 1000 guarantees:
-//   1) different restart_id yields completely disjoint random sequences
-//   2) deterministic reproducibility for the same restart_id
-//
-// Time budget: all threads share the same deadline and check it in their
-// loops: if (chrono::steady_clock::now() >= deadline) break;
-RestartResult run_one_restart(int restart_id,
-                               const Hypergraph &fine,
-                               chrono::steady_clock::time_point deadline) {
-    mt19937 rng(42 + restart_id * 1000); // 每个重启使用独立随机种子，保证可复现
+// run_one_restart_kway -- one complete random restart for k-way partitioning.
+// Coarsen -> try kInitModeCount initial partitions -> FM refine -> uncoarsen.
+RestartResult run_one_restart_kway(int restart_id,
+                                    const Hypergraph &fine,
+                                    int k,
+                                    chrono::steady_clock::time_point deadline,
+                                    const TopoGraph *topo = nullptr,
+                                    const vector<int> *fixed_of = nullptr) {
+    mt19937 rng(42 + restart_id * 1000);
 
-    // 粗化阶段
+    // --- Coarsening ---
     vector<Hypergraph> levels;
     vector<vector<int>> fine_to_coarse_maps;
     levels.push_back(fine);
@@ -794,108 +777,89 @@ RestartResult run_one_restart(int restart_id,
     while (static_cast<int>(levels.size()) < kMaxLevels &&
            chrono::steady_clock::now() < deadline) {
         const Hypergraph &curr = levels.back();
-        if (curr.n <= kMinCoarsestNodes) {
-            break;
-        }
-
+        if (curr.n <= kMinCoarsestNodes) break;
         CoarsenResult cr = coarsen_once(curr, rng);
-        if (cr.coarse.n <= 0 || cr.coarse.n >= curr.n) {
-            break;
-        }
-
+        if (cr.coarse.n <= 0 || cr.coarse.n >= curr.n) break;
         double ratio = static_cast<double>(cr.coarse.n) / static_cast<double>(curr.n);
         fine_to_coarse_maps.push_back(std::move(cr.fine_to_coarse));
         levels.push_back(std::move(cr.coarse));
-
-        if (ratio > kStopCoarsenRatio) {
-            break;
-        }
+        if (ratio > kStopCoarsenRatio) break;
     }
 
     int coarsest_level = static_cast<int>(levels.size()) - 1;
 
-    // 当前重启跟踪自己的最佳结果（无需锁）
-    vector<char> local_best_part;
+    // --- Try kInitModeCount initializations ---
+    vector<int> local_best_part;
     int local_best_cut = numeric_limits<int>::max();
 
     for (int init_mode = 0; init_mode < kInitModeCount; ++init_mode) {
-        if (chrono::steady_clock::now() >= deadline) {
-            break;
-        }
+        if (chrono::steady_clock::now() >= deadline) break;
 
-        // 初始划分
-        vector<char> part;
+        vector<int> part;
         switch (init_mode) {
         case 0:
-            part = init_degree_balanced_part(levels[coarsest_level], rng);
+            part = init_degree_balanced_kway(levels[coarsest_level], k, rng, topo, fixed_of);
             break;
         case 1:
-            part = init_random_balanced_part(levels[coarsest_level], rng);
+            part = init_random_balanced_kway(levels[coarsest_level], k, rng, topo, fixed_of);
             break;
         default:
-            part = init_smallnet_balanced_part(levels[coarsest_level], rng);
+            part = init_smallnet_balanced_kway(levels[coarsest_level], k, rng, topo, fixed_of);
             break;
         }
 
-        // 粗层 FM
-        fm_refine_sampled(levels[coarsest_level], part, rng,
-                          kCoarseFmPasses, kCoarseMaxSteps,
-                          kCoarseCandidateSize, deadline);
-        fm_refine_sampled(levels[coarsest_level], part, rng,
-                          kCoarsePolishPasses, kCoarsePolishMaxSteps,
-                          kCoarsePolishCandidate, deadline);
+        // Coarse FM
+        fm_refine_kway(levels[coarsest_level], part, k, rng,
+                       kCoarseFmPasses, kCoarseMaxSteps,
+                       kCoarseCandidateSize, deadline, topo, fixed_of);
+        fm_refine_kway(levels[coarsest_level], part, k, rng,
+                       kCoarsePolishPasses, kCoarsePolishMaxSteps,
+                       kCoarsePolishCandidate, deadline, topo, fixed_of);
 
-        // 逐层反粗化
+        // --- Uncoarsen and refine ---
         for (int lv = coarsest_level - 1; lv >= 0; --lv) {
-            if (chrono::steady_clock::now() >= deadline) {
-                break;
-            }
-
-            vector<char> finer_part(levels[lv].n, 1);
+            if (chrono::steady_clock::now() >= deadline) break;
+            vector<int> finer_part(levels[lv].n, 0);
             const vector<int> &map = fine_to_coarse_maps[lv];
-            for (int u = 0; u < levels[lv].n; ++u) {
+            for (int u = 0; u < levels[lv].n; ++u)
                 finer_part[u] = part[map[u]];
-            }
             part.swap(finer_part);
 
+            auto &fm = fm_refine_kway;
             if (lv == 0) {
-                fm_refine_sampled(levels[lv], part, rng,
-                                  kFineFmPasses, kFineMaxSteps,
-                                  kFineCandidateSize, deadline);
-                fm_refine_sampled(levels[lv], part, rng,
-                                  kFinePolishPasses, kFinePolishMaxSteps,
-                                  kFinePolishCandidate, deadline);
+                fm(levels[lv], part, k, rng,
+                   kFineFmPasses, kFineMaxSteps, kFineCandidateSize, deadline,
+                   topo, fixed_of);
+                fm(levels[lv], part, k, rng,
+                   kFinePolishPasses, kFinePolishMaxSteps, kFinePolishCandidate, deadline,
+                   topo, fixed_of);
             } else {
-                fm_refine_sampled(levels[lv], part, rng,
-                                  kMidFmPasses, kMidMaxSteps,
-                                  kMidCandidateSize, deadline);
-                fm_refine_sampled(levels[lv], part, rng,
-                                  kMidPolishPasses, kMidPolishMaxSteps,
-                                  kMidPolishCandidate, deadline);
+                fm(levels[lv], part, k, rng,
+                   kMidFmPasses, kMidMaxSteps, kMidCandidateSize, deadline,
+                   topo, fixed_of);
+                fm(levels[lv], part, k, rng,
+                   kMidPolishPasses, kMidPolishMaxSteps, kMidPolishCandidate, deadline,
+                   topo, fixed_of);
             }
         }
 
-        if (chrono::steady_clock::now() >= deadline) {
-            break;
-        }
-
-        int cut = evaluate_cut(fine, part);
+        if (chrono::steady_clock::now() >= deadline) break;
+        int cut = evaluate_cut_kway(fine, part, k);
         if (cut < local_best_cut) {
             local_best_cut = cut;
             local_best_part = std::move(part);
         }
     }
 
-    if (local_best_part.empty()) {
-        local_best_part.assign(fine.n, 1);
-    }
-
+    if (local_best_part.empty())
+        local_best_part.assign(fine.n, 0);
     return {std::move(local_best_part), local_best_cut};
 }
 
 }  // namespace
 
-void Solution::read_benchmark(Graph &graph, string benchmark_name) {
+void Solution::read_benchmark(Graph &graph, string benchmark_name,
+                              vector<vector<int>> *fixed_lists) {
     ifstream file(benchmark_name);
 
     if(!file.is_open()) {
@@ -906,9 +870,8 @@ void Solution::read_benchmark(Graph &graph, string benchmark_name) {
     // --- ICCAD 2021 format ---
     // Line 1: <num_nodes>
     // Line 2: <num_nets>
-    // Lines 3 .. 3+num_nets-1: each line is one net, <node_id> <node_id> ...
-    // Remaining lines: fixed nodes per FPGA (not needed for bipartitioning)
-    // Note: Node IDs are 0-based in the file; we convert to 1-based internally.
+    // Lines 3 .. 3+num_nets-1: each line is one net, 0-based node IDs
+    // Remaining lines: fixed nodes per FPGA (line i → FPGA i-1)
     int node_num, edge_num;
     string line;
     getline(file >> ws, line);
@@ -919,8 +882,9 @@ void Solution::read_benchmark(Graph &graph, string benchmark_name) {
     istringstream iss2(line);
     iss2 >> edge_num;
 
-    (void)node_num;  // informational only
+    (void)node_num;
 
+    // Read nets
     for(int i = 0; i < edge_num; i++) {
         getline(file, line);
         istringstream iss(line);
@@ -929,50 +893,46 @@ void Solution::read_benchmark(Graph &graph, string benchmark_name) {
         Net *net = graph.add_net(i);
 
         while(iss >> node_id) {
-            node_id++;  // convert 0-based to 1-based indexing
+            node_id++;  // 0-based → 1-based
             Node *node = graph.get_or_create_node(node_id);
             node->add_net(net);
             net->add_node(node);
         }
     }
 
-    // The remaining lines (fixed nodes per FPGA) are not needed.
-    // Closing the file; unread lines are harmless.
+    // Read fixed node assignments (remaining lines)
+    if (fixed_lists) {
+        while (getline(file >> ws, line)) {
+            istringstream iss(line);
+            vector<int> nodes;
+            int node_id;
+            while (iss >> node_id) {
+                node_id++;  // 0-based → 1-based
+                nodes.push_back(node_id);
+            }
+            if (!nodes.empty())
+                fixed_lists->push_back(std::move(nodes));
+        }
+    }
+
     file.close();
 }
 
-void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y,
-                                      unsigned int num_threads) {
+int Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y,
+                                      unsigned int num_threads,
+                                      int k,
+                                      vector<int> *node_partition,
+                                      const string &topo_file,
+                                      const vector<int> *fixed_of) {
     // --- Step 1: determine parallelism ---
-    // If num_threads == 0, use OpenMP's default (usually = CPU core count).
-    if (num_threads == 0) {
-        num_threads = omp_get_max_threads();
-    }
-    if (num_threads == 0) {
-        num_threads = 1;
-    }
+    if (num_threads == 0) num_threads = omp_get_max_threads();
+    if (num_threads == 0) num_threads = 1;
 
     // --- Step 2: build read-only global data ---
-    // fine Hypergraph: read-only after construction, shared safely among threads.
     vector<int> idx_to_id;
     Hypergraph fine = build_fine_hypergraph(graph, idx_to_id);
 
     // --- Step 3: adaptive time budget ---
-    // Instead of a fixed wall-clock deadline, we scale the budget with the
-    // problem size. Larger graphs need proportionally more time per restart.
-    //
-    // Formula: budget = kBudgetBaseTime * (N / kBudgetBaseNodes)^kBudgetExponent
-    //   - Sub-linear exponent (0.8) accounts for coarse hierarchy reducing
-    //     effective problem size at each level.
-    //   - Clamped to [kBudgetMinSeconds, kBudgetMaxSeconds].
-    //
-    // Examples (approximate):
-    //   Nodes     | Budget (s)
-    //   ----------|-----------
-    //    12k      |   90        (ibm01, baseline)
-    //    50k      |  287        (~5 min)
-    //   100k      |  499        (~8 min)
-    //   300k      | 1243        (~21 min, case1 size)
     int64_t budget_seconds = kBudgetBaseTime;
     if (fine.n > kBudgetBaseNodes) {
         double ratio = static_cast<double>(fine.n) / static_cast<double>(kBudgetBaseNodes);
@@ -981,35 +941,30 @@ void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y,
     }
     budget_seconds = max<int64_t>(budget_seconds, kBudgetMinSeconds);
     budget_seconds = min<int64_t>(budget_seconds, kBudgetMaxSeconds);
-
     auto deadline = chrono::steady_clock::now() + chrono::seconds(budget_seconds);
 
+    // --- Step 3b: read topology (if provided) ---
+    // TopoGraph is read-only after construction, safe for concurrent access.
+    TopoGraph topo_graph;
+    const TopoGraph *topo_ptr = nullptr;
+    if (!topo_file.empty()) {
+        topo_graph = read_topo_graph(topo_file);
+        topo_ptr = &topo_graph;
+    }
+
     // --- Step 4: OpenMP parallel execution ---
-    // Pre-allocate one result slot per restart. Each thread writes to its
-    // own slot (results[r]) where r is the private loop index.
-    // Since different threads always access different indices, no locking
-    // is needed during parallel execution.
+    // Each thread independently runs one restart via run_one_restart_kway.
+    // topo_ptr and fixed_of_ptr are shared (read-only), safe.
     vector<RestartResult> results(kRestarts);
 
-    // OpenMP parallel for:
-    //   num_threads(n)  —  worker thread count
-    //   schedule(dynamic)  —  finished threads pick up the next pending
-    //                         restart automatically (load balancing).
-    //
-    // Variable sharing analysis (OpenMP default rules):
-    //   results      —  shared (each thread writes results[r] with distinct r)
-    //   fine         —  shared (read-only, safe)
-    //   deadline     —  shared (read-only, safe)
-    //   r            —  private (loop counter, handled automatically by OpenMP)
-    //   run_one_restart() internals are all thread-local (stack-allocated)
     #pragma omp parallel for num_threads(num_threads) schedule(dynamic)
     for (int r = 0; r < kRestarts; ++r) {
-        results[r] = run_one_restart(r, fine, deadline);
+        results[r] = run_one_restart_kway(r, fine, k, deadline,
+                                           topo_ptr, fixed_of);
     }
 
     // --- Step 5: sequential merge ---
-    // (Trivial compared to the parallel work; no need to parallelize.)
-    vector<char> best_part;
+    vector<int> best_part;
     int best_cut = numeric_limits<int>::max();
     for (auto &res : results) {
         if (res.cut < best_cut) {
@@ -1020,18 +975,28 @@ void Solution::my_partition_algorithm(Graph graph, set<int> &X, set<int> &Y,
 
     // --- Step 6: fallback ---
     if (best_part.empty()) {
-        best_part.assign(fine.n, 1);
+        best_part.assign(fine.n, 0);
     }
 
     // --- Step 7: convert result ---
+    // For k=2: fill X/Y sets (backward compatible)
+    // For any k: fill node_partition if requested
     X.clear();
     Y.clear();
     for (int u = 0; u < fine.n; ++u) {
         int node_id = idx_to_id[u];
-        if (best_part[u] == 0) {
-            X.insert(node_id);
-        } else {
-            Y.insert(node_id);
+        int p = best_part[u];
+        if (k == 2) {
+            if (p == 0) X.insert(node_id);
+            else        Y.insert(node_id);
+        }
+        if (node_partition) {
+            // node_partition is 1-indexed: node_partition[node_id] = partition
+            if (static_cast<int>(node_partition->size()) <= node_id)
+                node_partition->resize(node_id + 1);
+            (*node_partition)[node_id] = p;
         }
     }
+
+    return best_cut;
 }
