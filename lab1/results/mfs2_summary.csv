@@ -1,0 +1,9 @@
+﻿case,exit_code,wall_seconds,cutsize,algo_time_seconds,log_file
+case1,0,1197.935,460165,1193.85,D:\大三\VLSI\lab1\results\mfs2_logs\case1.log
+case2,0,1506.779,615102,1502.72,D:\大三\VLSI\lab1\results\mfs2_logs\case2.log
+case3,0,1804.69,769630,1799.69,D:\大三\VLSI\lab1\results\mfs2_logs\case3.log
+case4,0,2084.357,923861,2078.15,D:\大三\VLSI\lab1\results\mfs2_logs\case4.log
+case5,0,2361.569,1078413,2353.56,D:\大三\VLSI\lab1\results\mfs2_logs\case5.log
+case6,0,2635.284,1233315,2626.36,D:\大三\VLSI\lab1\results\mfs2_logs\case6.log
+case7,0,2895.754,1387681,2885.29,D:\大三\VLSI\lab1\results\mfs2_logs\case7.log
+case8,0,3135.881,1541865,3125.1,D:\大三\VLSI\lab1\results\mfs2_logs\case8.log

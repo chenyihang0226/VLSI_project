@@ -28,8 +28,8 @@ class Solution{
          *   至少两个不同 partition 的线网数。
          *
          * 平衡约束：
-         *   每路权重在 [total/k * (0.5-r), total/k * (0.5+r)] 范围内。
-         *   r in [0, 1/k]。当 r*k=1 时严格均分。
+         *   每路权重在 [total/k * (1-r), total/k * (0.5+r)] 范围内。
+         *   r = kBalanceRatio，即标准形式 (1±eps) * W/k。
          *
          * 并行策略：
          *   外层 kRestarts 次重启通过 OpenMP #pragma omp parallel for 并行。

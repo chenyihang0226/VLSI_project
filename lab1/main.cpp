@@ -86,8 +86,17 @@ int main(int argc, char **argv) {
 
     // 构建固定节点映射（fixed_of[node_id] = partition_id, 1-indexed）
     if (!fixed_lists.empty()) {
+        if (static_cast<int>(fixed_lists.size()) != k) {
+            cerr << "Warning: fixed-node section has " << fixed_lists.size()
+                 << " line(s), but k = " << k << endl;
+        }
         fixed_of.assign(graph.get_node_num() + 1, -1);
         for (size_t p = 0; p < fixed_lists.size(); ++p) {
+            if (p >= static_cast<size_t>(k)) {
+                cerr << "Warning: ignoring fixed nodes for partition " << p
+                     << " because k = " << k << endl;
+                continue;
+            }
             for (int node_id : fixed_lists[p]) {
                 if (node_id < (int)fixed_of.size())
                     fixed_of[node_id] = static_cast<int>(p);
@@ -100,6 +109,19 @@ int main(int argc, char **argv) {
     }
 
     // ─── 执行划分算法（计时） ────────────────────────────────────────────
+    string base_name = benchmark_name;
+    size_t slash_pos = base_name.find_last_of("/\\");
+    if (slash_pos != string::npos) {
+        base_name = base_name.substr(slash_pos + 1);
+    }
+    size_t dot_pos = base_name.find_last_of('.');
+    if (dot_pos != string::npos) {
+        base_name = base_name.substr(0, dot_pos);
+    }
+
+    fs::create_directory("results");
+    string partition_file = "results/" + base_name + "_partition.txt";
+
     cout << "Running partition algorithm... " << flush;
     auto algo_start = chrono::steady_clock::now();
     set<int> X, Y;
@@ -114,19 +136,6 @@ int main(int argc, char **argv) {
     cout << "Best cutsize found: " << best_cut << endl;
 
     // ─── 输出分区结果 ──────────────────────────────────────────────────
-    string base_name = benchmark_name;
-    size_t slash_pos = base_name.find_last_of("/\\");
-    if (slash_pos != string::npos) {
-        base_name = base_name.substr(slash_pos + 1);
-    }
-    size_t dot_pos = base_name.find_last_of('.');
-    if (dot_pos != string::npos) {
-        base_name = base_name.substr(0, dot_pos);
-    }
-
-    fs::create_directory("results");
-    string partition_file = "results/" + base_name + "_partition.txt";
-
     ofstream out(partition_file);
     if (!out.is_open()) {
         cerr << "Failed to open output file: " << partition_file << endl;
